@@ -119,11 +119,14 @@ new delegation. That helper may use bounded event waits and send the existing
 completion report when the main chat is idle. Do not create a new user-owned
 app chat just to simulate this helper. Never make the main agent wait for it.
 
-Delegation does not prove detached lifetime. Until the host has demonstrated
-that the helper survives the completing chip's final response, do not close that
-chip relying on an untested helper. The completing chip itself may keep the
-notification wait; the main chat stays free in either case. This is separation
-of waiting, not a claim of polling-free or guaranteed after-turn delivery.
+A two-level INTERNAL-agent test on this host demonstrated that a notification
+child remained running after its immediate internal parent completed, then sent
+a message to the still-active root without a root wait. See VALIDATION.md. This
+does NOT establish the lifetime of a helper under a separate user-owned app
+chip, nor wake-up after the root itself has ended its response. Do not close an
+app chip relying on those unverified assumptions. Its own notification wait
+remains an option while the main stays free. No polling-free, durable daemon
+or guaranteed after-root-turn delivery is claimed.
 
 ## Completion means user-visible reporting
 
