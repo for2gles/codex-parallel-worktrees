@@ -7,6 +7,7 @@
 
 **Node.js 18+와 Git, 제공된 Codex CLI만 사용합니다. Python·npm install·tmux는 필요 없습니다.**
 macOS/Linux용입니다. 실제 검증 환경과 범위는 [VALIDATION.md](VALIDATION.md)에 기록합니다.
+Codex CLI **0.163.0·0.164.0·0.165.0·0.166.0**에서 실제 세션·리모트 터미널 접속·완료 큐 보관·사용자 보고를 확인했습니다(macOS arm64).
 
 ## 설치
 
