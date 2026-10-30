@@ -14,10 +14,15 @@
     "projectId": "ACTUAL_PROJECT_ID",
     "environment": { "type": "worktree" }
   },
-  "title": "하위칩 api",
-  "prompt": "독립 작업 범위·확인 조건·상위 채팅 정보와 완료 보고 절차"
+  "title": "하위칩 · 로그인 API",
+  "prompt": "You are 하위칩 api. 독립 작업 범위·확인 조건·상위 채팅 정보와 완료 보고 절차"
 }
 ```
+
+`title`은 상위칩이 정합니다. 사용자가 제목을 지정하면 그대로 쓰고, 없으면 `하위칩 · 로그인 테스트`처럼 짧은 작업명을 선택합니다.
+역할 설명 `You are 하위칩 ...`은 prompt에만 넣습니다. projectless 생성에도 title을 넘기고, 실제 생성된 제목을 확인합니다.
+제목이 지시문으로 잡히거나 요청된 fork의 제목을 지정해야 하면 준비된 실제 threadId로 `set_thread_title`을 호출합니다.
+사용자가 이후 바꾼 제목은 자동으로 덮어쓰지 않습니다.
 
 저장되지 않은 저장소는 요청된 별도 projectless 채팅을 생성하고, 그 채팅에서 첫 작업으로 `create_worktree`를 사용합니다.
 `sourceRoot`와 `ref`는 승인된 실제 소스/커밋이어야 합니다. `allowAsync: true`로 요청하고 반환된 상태를 확인하세요.

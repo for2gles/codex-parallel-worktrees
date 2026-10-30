@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const cp = require('node:child_process');
-const VERSION = '0.5.0-app.1';
+const VERSION = '0.5.0-app.2';
 const MAX_SUMMARY = 6000;
 function git(repo, args) {
   const r = cp.spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8', maxBuffer: 8e6 });

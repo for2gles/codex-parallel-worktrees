@@ -33,6 +33,10 @@ Resolve `scripts/app.cjs` from this skill's actual directory.
 1. Call `list_projects`. For the intended saved Git project, use `create_thread`
    with a Worktree environment. Use the actual returned project ID. Only specify
    a starting state when the human authorized that state; never invent a branch.
+   Always supply `title`: use the human's requested title, or have the parent
+   choose a short task name in the user's language, e.g. `하위칩 · 로그인 API`.
+   Keep role introductions such as `You are 하위칩 api` in the prompt only; never
+   use the prompt body as a title. Apply this to projectless chips too.
 2. If the intended repository is not saved, create the requested projectless
    chat and make its FIRST workspace action `create_worktree` on that repository.
    This is a bootstrap state, not a usable chip. No coding or descendant creation
@@ -41,6 +45,9 @@ Resolve `scripts/app.cjs` from this skill's actual directory.
 3. Await asynchronous setup. A `clientThreadId` or `operationId` is not a ready
    thread ID. Use official status tools and exact returned workspace paths.
    Never guess a new ID, directory, socket or successful setup.
+   Verify the actual title once the thread is ready. Use `set_thread_title` to
+   repair a prompt-derived title or name a requested fork. Preserve any later
+   title the human explicitly chose; do not reset it automatically.
 4. Verify a distinct registered Git worktree for every chip, including descendants.
    Record real thread/host/worktree/parent IDs with `app.cjs register` only after
    setup. App-managed worktrees may use detached HEAD; do not require `pw/` branches.
