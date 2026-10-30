@@ -27,7 +27,7 @@ skill's actual directory; run commands with `--repo` pointing to the original ch
    All workers start from the current committed HEAD; they cannot see the parent's
    uncommitted edits or conversation unless you explicitly provide that context.
 3. Start each worker with `start.sh ID --repo REPO --prompt-file TASK`. For an
-   authorized editing task, `--sandbox workspaceWrite` requests normal scoped writes
+   authorized editing task, `--sandbox workspace-write` requests normal scoped writes
    subject to host requirements; otherwise the CLI's default policy applies. Use the
    configured model unless the user asks for another. Worker instructions prohibit
    recursive delegation, pushing, merging and security-configuration changes.

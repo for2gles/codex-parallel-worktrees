@@ -9,7 +9,7 @@ Python standard library only; no tmux, Node.js, package install or CLI upgrade.
 Clone this public repository directly into a skill discovery directory:
 
 ```bash
-git clone https://github.com/for2gles/codex-parallel-worktrees.git "$HOME/.agents/skills/parallel-worktrees"
+git clone --branch v0.1.1 https://github.com/for2gles/codex-parallel-worktrees.git "$HOME/.agents/skills/parallel-worktrees"
 ```
 
 Codex discovers skills automatically; restart it if the new skill is missing. In Codex:
@@ -26,6 +26,10 @@ Read [the command reference](references/commands.md) for manual operation,
 approval handling and limits. `SKILL.md` contains the main agent's workflow.
 
 ## Compatibility
+
+Real worker smoke tests passed with Codex CLI **0.163.0 and 0.164.0** on macOS
+arm64. See [VALIDATION.md](VALIDATION.md). Version 0.1.1 fixes the optional
+`--sandbox` wire value; use `--sandbox workspace-write` for normal scoped edits.
 
 Requires Python 3.9+, Git, macOS/Linux and a supplied, authenticated Codex CLI
 supporting `codex app-server` over stdio and v2 thread/turn methods. Uses one

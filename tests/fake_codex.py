@@ -61,6 +61,9 @@ while True:
         if method == "initialize":
             result = {"userAgent": "fake"}
         elif method in {"thread/start", "thread/resume"}:
+            if params.get("sandbox") not in (None, "read-only", "workspace-write"):
+                send({"id":ident,"error":{"code":-32600,"message":"Invalid sandbox mode"}})
+                continue
             result = {"thread": {"id": thread_id}, "model": "fake",
                       "sandbox": {"type": "workspaceWrite"}, "approvalPolicy": "onRequest"}
         elif method == "turn/start":

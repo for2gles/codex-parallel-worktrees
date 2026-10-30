@@ -23,8 +23,8 @@ It does not prove model access, editing, steering or Cofa compatibility. `start`
 accepts `--codex /existing/executable` and optional `--model MODEL`; otherwise it
 uses PATH and the CLI's configured model. It never upgrades anything. No sandbox,
 approval, provider or model configuration is overridden by default. For an
-authorized editing task, `start --sandbox workspaceWrite` requests the normal
-workspace-write mode, subject to the host's enforced requirements. `readOnly` is
+authorized editing task, `start --sandbox workspace-write` requests the normal
+workspace-write mode, subject to the host's enforced requirements. `read-only` is
 also supported. No full-access mode or approval-bypass option is exposed.
 
 ## State and completion

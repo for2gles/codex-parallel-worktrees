@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 ACTIVE = {"starting", "running", "waiting_for_input"}
 TERMINAL = {"completed", "failed", "interrupted", "disconnected", "stopped"}
 APPROVALS = {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}
@@ -43,6 +43,11 @@ def valid_id(value):
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", value):
         raise RuntimeError("Worker ID: 1-40 lowercase letters, digits or hyphens")
     return value
+
+
+def sandbox_mode(value):
+    # thread/start uses CLI-style SandboxMode, unlike turn sandboxPolicy.type.
+    return {"readOnly": "read-only", "workspaceWrite": "workspace-write"}.get(value, value)
 
 
 def atomic(path, data):
@@ -409,7 +414,7 @@ def parser():
             s.add_argument("--probe", action="store_true", help="Initialize app-server without starting a model turn")
         if name == "start":
             s.add_argument("--model", help="Omit to inherit configured model")
-            s.add_argument("--sandbox", choices=["readOnly", "workspaceWrite"],
+            s.add_argument("--sandbox", type=sandbox_mode, choices=["read-only", "workspace-write"],
                            help="Optional normal Codex sandbox mode; host requirements still apply")
         if name == "wait":
             s.add_argument("--timeout", type=float, default=30, help="Bounded wait, seconds")

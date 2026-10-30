@@ -164,6 +164,14 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(json.loads(p.stdout)["initialize"], "ok")
         self.assertEqual(json.loads(self.run_cli("status").stdout), [])
 
+    def test_explicit_sandbox_uses_wire_mode_names(self):
+        for ident, mode in [("normalmode", "workspace-write"), ("oldalias", "workspaceWrite")]:
+            with self.subTest(mode=mode):
+                self.workers.append(ident)
+                p = self.run_cli("start", ident, "--codex", str(FAKE), "--sandbox", mode, "--prompt", "FAST")
+                self.assertEqual(json.loads(p.stdout)["sandbox"], "workspace-write")
+                self.wait(ident)
+
 
 if __name__ == "__main__":
     unittest.main()
