@@ -9,7 +9,8 @@ if (process.argv.includes('--version')) { console.log('fake-codex 1.0'); process
 const address = process.argv[process.argv.indexOf('--listen') + 1];
 if (!address?.startsWith('unix://')) throw new Error('Fixture requires Unix listener');
 const clients = new Set(); const thread = 'fake-' + process.pid;
-let turn, number = 0, timer, task = '';
+let turn, number = 0, timer, task = '', approval = false;
+const history = [];
 function wire(socket, value) {
   const data = Buffer.from(JSON.stringify(value)); const n = data.length; let head;
   if (n < 126) head = Buffer.from([0x81, n]);
@@ -19,7 +20,8 @@ function wire(socket, value) {
 }
 function event(method, params) { for (const c of clients) wire(c, { method, params }); }
 function complete(status = 'completed') {
-  clearTimeout(timer); timer = null;
+  clearTimeout(timer); timer = null; approval = false;
+  if (history.length) history[history.length - 1].status = status;
   if (status === 'completed') {
     for (const match of task.matchAll(/^MAKE ([\w.-]+) ([^\n]+)$/gm)) {
       fs.writeFileSync(match[1], match[2] + '\n'); cp.execFileSync('git', ['add', '--', match[1]]);
@@ -34,15 +36,20 @@ function handle(socket, msg) {
   if (msg.method === 'initialized') return;
   if (msg.method === 'initialize') result = { userAgent: 'fake' };
   else if (['thread/start', 'thread/resume'].includes(msg.method)) {
+    if (msg.method === 'thread/resume' && p.threadId !== thread) return wire(socket, { id: msg.id, error: { message: 'Thread not found' } });
     if (p.sandbox && !['workspace-write', 'read-only'].includes(p.sandbox)) return wire(socket, { id: msg.id, error: { message: 'Invalid sandbox mode' } });
-    result = { thread: { id: thread, cwd: process.cwd() }, model: 'fake', approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite' } };
+    result = { thread: { id: thread, cwd: process.cwd(), turns: history, status: timer || approval ? { type: 'active', activeFlags: approval ? ['waitingOnApproval'] : [] } : { type: 'idle' } }, model: 'fake', approvalPolicy: 'on-request', sandbox: { type: 'workspaceWrite' } };
   } else if (msg.method === 'turn/start') {
+    if (timer || approval) return wire(socket, { id: msg.id, error: { message: 'Turn already active' } });
     turn = 'turn-' + ++number; task = p.input[0].text; if (task.includes('CRASH')) process.exit(7);
+    history.push({ id: turn, status: 'inProgress', items: [] });
     event('turn/started', { threadId: thread, turn: { id: turn } }); result = { turn: { id: turn, status: 'inProgress' } };
-    if (task.includes('APPROVE')) wire(socket, { id: 900, method: 'item/commandExecution/requestApproval', params: { threadId: thread, turnId: turn, command: 'fixture only' } });
+    if (task.startsWith('[하위칩 완료 알림]')) timer = setTimeout(complete, 250);
+    else if (task.includes('APPROVE')) { approval = true; wire(socket, { id: 900, method: 'item/commandExecution/requestApproval', params: { threadId: thread, turnId: turn, command: 'fixture only' } }); }
     else if (task.includes('FAST')) complete();
     else timer = setTimeout(complete, task.includes('SLOW') ? 2000 : 250);
   } else if (msg.method === 'turn/steer') {
+    if (task.includes('COMPLETE_BEFORE_STEER')) { complete(); return wire(socket, { id: msg.id, error: { message: 'No matching active turn' } }); }
     if (!timer || p.expectedTurnId !== turn) return wire(socket, { id: msg.id, error: { message: 'No matching active turn' } });
     task += '\n' + p.input[0].text; clearTimeout(timer); timer = setTimeout(complete, 200); result = { turnId: turn };
   } else if (msg.method === 'turn/interrupt') complete('interrupted');

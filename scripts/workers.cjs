@@ -7,8 +7,9 @@ const net = require('node:net');
 const crypto = require('node:crypto');
 const cp = require('node:child_process');
 const { UnixWebSocket, MAX } = require('./unix-ws.cjs');
+const { Notifications, records: notificationRecords } = require('./notifications.cjs');
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const ACTIVE = new Set(['starting', 'running', 'waiting_for_input']);
 const TERMINAL = new Set(['completed', 'failed', 'interrupted', 'disconnected', 'stopped']);
 const APPROVALS = new Set(['item/commandExecution/requestApproval', 'item/fileChange/requestApproval']);
@@ -144,6 +145,7 @@ class Chip {
   constructor(folder) {
     this.folder = folder; this.state = stateOf(folder); this.pending = new Map(); this.counter = 0;
     this.chain = Promise.resolve(); this.ready = false; this.stopping = false;
+    this.notifications = new Notifications(this, control);
     this.stopped = new Promise(resolve => { this.finish = resolve; });
   }
   save() { this.state.updated_at = Date.now() / 1000; atomic(path.join(this.folder, 'state.json'), this.state); }
@@ -158,6 +160,8 @@ class Chip {
     catch (e) { const p = this.pending.get(ident); if (p) { clearTimeout(p.timer); this.pending.delete(ident); } throw e; }
   }
   event(msg) {
+    const source = msg.params?.threadId || msg.params?.thread?.id;
+    if (source && this.state.thread_id && source !== this.state.thread_id) return;
     this.record(msg); const p = msg.params || {};
     if (msg.method === 'turn/started') { Object.assign(this.state, { turn_id: p.turn.id, status: 'running', error: null, last_message: '', pending_requests: [] }); delete this.state.completed_at; }
     else if (msg.method === 'turn/completed') Object.assign(this.state, { turn_id: p.turn.id, status: p.turn.status, error: p.turn.error, pending_requests: [], completed_at: Date.now() / 1000 });
@@ -169,21 +173,27 @@ class Chip {
       if (!this.state.pending_requests.length && this.state.status === 'waiting_for_input') this.state.status = 'running';
     }
     this.save();
+    if (msg.method === 'turn/completed') this.notifications.completed(p.turn);
+    if (['turn/started', 'turn/completed', 'serverRequest/resolved'].includes(msg.method)) this.notifications.schedule();
   }
   async readLoop() {
     try {
       while (true) {
         const msg = await this.ws.receive();
         if (msg.method && Object.hasOwn(msg, 'id')) {
+          if (msg.params?.threadId && msg.params.threadId !== this.state.thread_id) continue;
           this.state.pending_requests.push(msg); this.state.status = 'waiting_for_input'; this.record(msg); this.save();
         } else if (Object.hasOwn(msg, 'id')) {
           const p = this.pending.get(msg.id);
-          if (p) { clearTimeout(p.timer); this.pending.delete(msg.id); msg.error ? p.reject(new Error(JSON.stringify(msg.error))) : p.resolve(msg.result); }
+          if (p) { clearTimeout(p.timer); this.pending.delete(msg.id); if (msg.error) { const e = new Error(JSON.stringify(msg.error)); e.rpcError = msg.error; p.reject(e); } else p.resolve(msg.result); }
         } else this.event(msg);
       }
     } catch (e) {
       for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(e); } this.pending.clear();
-      if (!this.stopping && ACTIVE.has(this.state.status)) Object.assign(this.state, { status: 'disconnected', error: e.message });
+      if (!this.stopping && ACTIVE.has(this.state.status)) {
+        Object.assign(this.state, { status: 'disconnected', error: e.message });
+        this.notifications.completed({ id: this.state.turn_id || 'startup', status: 'failed', error: { message: e.message } });
+      }
       this.save(); this.finish();
     }
   }
@@ -195,10 +205,23 @@ class Chip {
   }
   dispatch(req) {
     if (req.op === 'status') return Promise.resolve(this.state);
+    if (req.op === 'child-completed') {
+      if (this.stopping) return Promise.reject(new Error('Parent is stopping; completion remains in child outbox'));
+      try { return Promise.resolve(this.notifications.accept(req.event)); } catch (e) { return Promise.reject(e); }
+    }
     const task = this.chain.then(() => this.mutate(req)); this.chain = task.catch(() => {}); return task;
   }
   async mutate(req) {
     if (!this.ready || this.stopping) throw new Error('Chip is initializing or stopping');
+    if (req.op === 'retry-notifications') {
+      let retried = 0;
+      for (const row of notificationRecords(this.folder, 'outbox').filter(r => r.state === 'failed' && r.target)) {
+        row.attempts = 0; this.notifications.delivery = this.notifications.delivery.then(() => this.notifications.send(row)); retried++;
+      }
+      for (const row of notificationRecords(this.folder, 'inbox').filter(r => r.state === 'failed')) { row.state = 'queued'; require('./notifications.cjs').save(this.notifications.inPath(row.event.event_id), row); retried++; }
+      this.notifications.schedule(); return { action: 'retry-scheduled', retried, ambiguous_replayed: false };
+    }
+    if (req.op === 'disconnect' && this.state.external_parent) { this.stopping = true; setTimeout(this.finish, 20); return { action: 'disconnected', parent_untouched: true }; }
     if (req.op === 'message') {
       if (['running', 'waiting_for_input'].includes(this.state.status)) return { action: 'steered', ...await this.rpc('turn/steer', {
         threadId: this.state.thread_id, expectedTurnId: this.state.turn_id, input: [{ type: 'text', text: req.text }] }) };
@@ -210,15 +233,17 @@ class Chip {
       if (APPROVALS.has(p.method) !== Object.hasOwn(req, 'decision')) throw new Error('Use --decision for command/file approvals, --json-file for other explicit answers');
       await this.ws.send({ id: p.id, result: Object.hasOwn(req, 'decision') ? { decision: req.decision } : req.result });
       this.state.pending_requests = this.state.pending_requests.filter(r => r !== p);
-      if (!this.state.pending_requests.length) this.state.status = 'running'; this.save(); return { action: 'responded', request_id: p.id };
+      if (!this.state.pending_requests.length) this.state.status = 'running'; this.save(); this.notifications.schedule(); return { action: 'responded', request_id: p.id };
     }
     if (req.op === 'stop') {
+      this.state.suppress_notifications = true; this.save();
       if (ACTIVE.has(this.state.status) && this.state.turn_id) {
         await this.rpc('turn/interrupt', { threadId: this.state.thread_id, turnId: this.state.turn_id });
         const deadline = Date.now() + 10000;
         while (ACTIVE.has(this.state.status) && Date.now() < deadline) await sleep(50);
         if (ACTIVE.has(this.state.status)) throw new Error('Interrupt unconfirmed; controller kept alive');
       }
+      await this.notifications.delivery;
       this.stopping = true; setTimeout(this.finish, 20); return { action: 'stopped' };
     }
     throw new Error('Unknown controller operation');
@@ -236,26 +261,45 @@ class Chip {
       });
     });
     try {
-      validateTree(this.state);
+      if (!this.state.external_parent) validateTree(this.state);
       await new Promise((resolve, reject) => { this.server.once('error', reject); this.server.listen(address, resolve); }); fs.chmodSync(address, 0o600);
       this.state.controller_pid = process.pid; this.state.status = 'starting'; this.state.pending_requests = []; this.save();
       this.log = fs.openSync(path.join(this.folder, 'app-server.stderr.log'), 'a', 0o600);
-      const opened = await openServer(this.state.codex, this.state.worktree, serverAddress, this.log); this.proc = opened.proc; this.ws = opened.ws;
-      Object.assign(this.state, { app_server_pid: this.proc.pid, server_socket: serverAddress, transport: 'unix-websocket' });
+      if (this.state.external_parent) this.ws = await UnixWebSocket.connect(this.state.server_socket);
+      else {
+        const opened = await openServer(this.state.codex, this.state.worktree, serverAddress, this.log); this.proc = opened.proc; this.ws = opened.ws;
+        Object.assign(this.state, { app_server_pid: this.proc.pid, server_socket: serverAddress, transport: 'unix-websocket' });
+      }
       this.reader = this.readLoop();
       this.state.server_info = await this.rpc('initialize', { clientInfo: { name: 'parallel_worktrees', title: '하위칩', version: VERSION } });
       await this.ws.send({ method: 'initialized', params: {} });
       const params = { cwd: this.state.worktree };
       if (this.state.model) params.model = this.state.model;
       if (this.state.sandbox) params.sandbox = this.state.sandbox;
-      const result = await this.rpc('thread/start', params); this.state.thread_id = result.thread.id;
-      if (result.thread.cwd && fs.realpathSync(result.thread.cwd) !== fs.realpathSync(this.state.worktree)) throw new Error('Session cwd does not match mandatory Worktree');
+      let result;
+      if (this.state.external_parent) result = await this.rpc('thread/resume', { threadId: this.state.thread_id });
+      else result = await this.rpc('thread/start', params);
+      if (this.state.external_parent && result.thread.id !== this.state.thread_id) throw new Error('Parent resume returned a different session');
+      this.state.thread_id = result.thread.id;
+      if (this.state.external_parent && result.thread.cwd) this.state.worktree = result.thread.cwd;
+      if (!this.state.external_parent && result.thread.cwd && fs.realpathSync(result.thread.cwd) !== fs.realpathSync(this.state.worktree)) throw new Error('Session cwd does not match mandatory Worktree');
       this.state.effective_policy = Object.fromEntries(['approvalPolicy', 'approvalsReviewer', 'sandbox', 'model'].filter(k => Object.hasOwn(result, k)).map(k => [k, result[k]]));
-      this.state.terminal_command = shell(terminalArgs(this.state)); this.state.attach_command = remoteInfo(this.state).attach_command;
-      this.ready = true; await this.begin(this.state.prompt); await this.stopped;
-    } catch (e) { Object.assign(this.state, { status: 'failed', error: e.message }); this.save(); }
+      this.state.terminal_command = shell(terminalArgs(this.state)); this.state.attach_command = this.state.external_parent ? this.state.terminal_command : remoteInfo(this.state).attach_command;
+      this.ready = true;
+      if (this.state.external_parent) {
+        const active = [...(result.thread.turns || [])].reverse().find(t => t.status === 'inProgress');
+        const status = result.thread.status;
+        this.state.turn_id = active?.id || null;
+        this.state.status = status?.type === 'active' ? status.activeFlags?.length ? 'waiting_for_input' : 'running' : 'completed';
+        this.save(); this.notifications.schedule();
+      } else await this.begin(this.state.prompt);
+      await this.stopped;
+    } catch (e) {
+      Object.assign(this.state, { status: 'failed', error: e.message }); this.save();
+      this.notifications.completed({ id: this.state.turn_id || 'startup', status: 'failed', error: { message: e.message } });
+    }
     finally {
-      this.stopping = true; if (this.ws) this.ws.close(); await terminate(this.proc); if (this.reader) await this.reader;
+      this.stopping = true; await this.notifications.delivery; if (this.ws) this.ws.close(); await terminate(this.proc); if (this.reader) await this.reader;
       if (this.server.listening) await new Promise(resolve => this.server.close(resolve));
       if (this.log !== undefined) fs.closeSync(this.log);
       if (ACTIVE.has(this.state.status)) this.state.status = 'stopped'; this.save();
@@ -263,9 +307,9 @@ class Chip {
     }
   }
 }
-async function launch(folder) {
+async function launch(folder, bridge = false) {
   const log = fs.openSync(path.join(folder, 'controller.log'), 'a', 0o600);
-  const proc = cp.spawn(process.execPath, [__filename, '_daemon', folder], { stdio: ['ignore', log, log], detached: true }); fs.closeSync(log); proc.unref();
+  const proc = cp.spawn(process.execPath, [__filename, bridge ? '_bridge' : '_daemon', folder], { stdio: ['ignore', log, log], detached: true }); fs.closeSync(log); proc.unref();
   let spawnError; proc.on('error', e => { spawnError = e; });
   const deadline = Date.now() + 35000;
   while (Date.now() < deadline) {
@@ -280,7 +324,7 @@ async function launch(folder) {
 function parse(argv) {
   const command = argv.shift(); const options = { repo: '.', ids: [] };
   const flags = new Set(['probe', 'print', 'json', 'help']);
-  const values = new Set(['repo', 'codex', 'model', 'sandbox', 'prompt', 'prompt-file', 'timeout', 'interval', 'decision', 'json-file', 'parent']);
+  const values = new Set(['repo', 'codex', 'model', 'sandbox', 'prompt', 'prompt-file', 'timeout', 'interval', 'decision', 'json-file', 'parent', 'remote', 'session', 'notify']);
   while (argv.length) {
     const a = argv.shift();
     if (!a.startsWith('--')) { options.ids.push(a); continue; }
@@ -318,15 +362,43 @@ async function main(argv = process.argv.slice(2)) {
   if (Number(process.versions.node.split('.')[0]) < 18) throw new Error('Node.js 18+ is required');
   if (process.platform === 'win32') throw new Error('This version requires macOS/Linux Unix sockets');
   const { command, options: o } = parse([...argv]);
-  if (command === '_daemon') {
+  if (command === '_daemon' || command === '_bridge') {
     process.umask(0o077); const folder = o.ids[0];
     await lock(path.join(folder, 'daemon.lockdir'), () => new Chip(folder).run(), 0); return 0;
   }
-  const commands = ['doctor', 'start', 'status', 'list', 'remote', 'attach', 'watch', 'message', 'wait', 'respond', 'stop', 'merge', 'cleanup'];
+  const commands = ['doctor', 'start', 'status', 'list', 'remote', 'attach', 'watch', 'message', 'wait', 'respond', 'stop', 'merge', 'cleanup', 'bind-parent', 'unbind-parent', 'notifications', 'notify-retry'];
   if (o.help || !command) { console.log('하위칩 / Parallel Worktrees ' + VERSION + '\nCommands: ' + commands.join(', ') + '\nUse --repo REPO; start/message need --prompt or --prompt-file. See references/commands.md.'); return 0; }
   if (!commands.includes(command)) throw new Error('Unknown command: ' + command);
   let { root, base } = repository(o.repo); fs.mkdirSync(base, { recursive: true, mode: 0o700 }); fs.chmodSync(base, 0o700);
   if (command === 'doctor') { output(await doctor(executable(o.codex || 'codex'), root, base, o.probe)); return 0; }
+  if (command === 'bind-parent') {
+    const bindingPath = path.join(base, 'root-parent.json');
+    if (!o.remote && !o.session) { const binding = read(bindingPath); output({ ...binding, state: await snapshot(binding.folder) }); return 0; }
+    if (!o.remote?.startsWith('unix:///') || !o.session) throw new Error('Provide --remote unix:///ABSOLUTE_SOCKET and --session SESSION_ID');
+    const endpoint = o.remote.slice(7), st = fs.statSync(endpoint);
+    if (!st.isSocket() || st.uid !== process.getuid()) throw new Error('Parent endpoint must be a local Unix socket owned by this user');
+    if (fs.existsSync(bindingPath)) throw new Error('A root parent is already registered; inspect or unbind it first');
+    const folder = path.join(base, '.links', 'root-' + crypto.randomBytes(6).toString('hex')); fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+    const state = { id: '$root', external_parent: true, registry_base: base, root_repo: root, repo: root, worktree: root,
+      codex: executable(o.codex || 'codex'), thread_id: o.session, server_socket: endpoint,
+      status: 'starting', pending_requests: [], notify_enabled: false, created_at: Date.now() / 1000 };
+    atomic(path.join(folder, 'state.json'), state); const attached = await launch(folder, true);
+    const binding = { folder, remote: o.remote, session_id: attached.thread_id, registered_at: Date.now() / 1000 };
+    atomic(bindingPath, binding); output({ ...binding, action: 'parent-registered', current_parent_turn_unchanged: true }); return 0;
+  }
+  if (command === 'unbind-parent') {
+    const file = path.join(base, 'root-parent.json'), binding = read(file);
+    try { await control(binding.folder, { op: 'disconnect' }); } catch (e) { if (!['ENOENT', 'ECONNREFUSED'].includes(e.code)) throw e; }
+    fs.unlinkSync(file); output({ action: 'parent-unregistered', parent_untouched: true }); return 0;
+  }
+  if (command === 'notifications') {
+    const folders = o.ids.length ? o.ids.map(i => path.join(base, id(i))) : inventory(base).map(s => path.join(base, s.id));
+    const binding = path.join(base, 'root-parent.json'); if (!o.ids.length && fs.existsSync(binding)) folders.push(read(binding).folder);
+    output(folders.map(folder => ({ chip: stateOf(folder).id, outbox: notificationRecords(folder, 'outbox'), inbox: notificationRecords(folder, 'inbox') }))); return 0;
+  }
+  if (command === 'notify-retry' && o.ids[0] === '$root') {
+    output(await control(read(path.join(base, 'root-parent.json')).folder, { op: 'retry-notifications' })); return 0;
+  }
   if (['status', 'list', 'wait'].includes(command)) {
     let states = inventory(base); let chosen = o.ids.length ? o.ids.map(i => id(i)) : states.map(s => s.id);
     if (command === 'wait') chosen = [...new Set(chosen.flatMap(i => [i, ...descendants(states, i).map(s => s.id)]))];
@@ -351,8 +423,13 @@ async function main(argv = process.argv.slice(2)) {
       if (o.parent) { parent = states.find(s => s.id === id(o.parent)); if (!parent) throw new Error('Parent chip not found'); root = fs.realpathSync(parent.worktree); }
       if (parent) validateTree(parent); clean(root);
       const codex = executable(o.codex || parent?.codex || 'codex'); const task = promptText(o); const sandbox = mode(o.sandbox || parent?.sandbox);
+      if (o.notify && !['on', 'off'].includes(o.notify)) throw new Error('--notify must be on or off');
+      const notifyEnabled = o.notify ? o.notify === 'on' : parent?.notify_enabled !== false;
+      const rootBinding = path.join(base, 'root-parent.json');
+      const notifyTarget = parent ? { kind: 'chip', folder: path.join(base, parent.id) } : fs.existsSync(rootBinding) ? { kind: 'external', folder: read(rootBinding).folder } : null;
       fs.mkdirSync(folder, { mode: 0o700 }); const tree = path.join(folder, 'worktree'); const branch = 'pw/' + ident + '-' + crypto.randomBytes(3).toString('hex');
-      const state = { schema_version: 3, id: ident, parent_id: parent?.id || null, depth: (parent?.depth || 0) + 1,
+      const state = { schema_version: 4, id: ident, parent_id: parent?.id || null, depth: (parent?.depth || 0) + 1,
+        notify_enabled: notifyEnabled, notify_target: notifyTarget,
         root_repo: parent?.root_repo || parent?.repo || root, repo: root, worktree: tree, branch,
         base_commit: git(root, ['rev-parse', 'HEAD']).stdout.trim(), codex, model: o.model || parent?.model || null,
         sandbox, status: 'starting', pending_requests: [], created_at: Date.now() / 1000,
@@ -364,6 +441,7 @@ async function main(argv = process.argv.slice(2)) {
         + 'Your worktree must be clean and committed before starting a child. Children inherit your committed HEAD, not your conversation or uncommitted files. '
         + 'Collect children, review and merge each child into YOUR worktree, then clean children before reporting completion. '
         + 'Use the helpers; do not run workers in a shared directory. No automatic approvals. Commit only assigned files and report checks.\n'
+        + 'Child turn completion is pushed automatically: while you are active it is steered into your turn; when idle it starts a follow-up. Do not duplicate already handled completion event IDs.\n'
         + 'Scripts: ' + SCRIPTS + '\nYour ID: ' + ident + '\nCreate child: sh ' + quote(path.join(SCRIPTS, 'start.sh'))
         + ' UNIQUE_CHILD_ID --repo ' + quote(tree) + ' --prompt-file /absolute/task.txt\n'
         + 'Inspect: sh ' + quote(path.join(SCRIPTS, 'list.sh')) + ' --repo ' + quote(state.root_repo) + '\n\n' + task;
@@ -404,6 +482,7 @@ async function main(argv = process.argv.slice(2)) {
     } finally { process.removeListener('SIGINT', stop); } return 0;
   }
   if (command === 'message') { output(await control(folder, { op: 'message', text: promptText(o) })); return 0; }
+  if (command === 'notify-retry') { output(await control(folder, { op: 'retry-notifications' })); return 0; }
   if (command === 'respond') {
     if (!!o.decision === !!o['json-file']) throw new Error('Provide --decision or --json-file');
     if (o.decision && !['accept', 'decline', 'cancel'].includes(o.decision)) throw new Error('Invalid approval decision');

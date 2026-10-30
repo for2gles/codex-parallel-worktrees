@@ -5,6 +5,7 @@ const cp = require('node:child_process'); const { promisify } = require('node:ut
 const execFile = promisify(cp.execFile); const SCRIPT = path.resolve(__dirname, '../scripts/workers.cjs');
 const FAKE = path.join(__dirname, 'fake-codex.cjs');
 const { UnixWebSocket } = require('../scripts/unix-ws.cjs');
+const { control } = require('../scripts/workers.cjs');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function setup(t) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-node-')); const repo = path.join(temp, 'repo with spaces'); fs.mkdirSync(repo);
@@ -14,17 +15,26 @@ async function setup(t) {
   async function raw(command, ...args) { try { const p = await execFile(process.execPath, [SCRIPT, command, '--repo', repo, ...args], { timeout: 45000, maxBuffer: 8 * 1024 * 1024 }); return { code: 0, ...p }; } catch (e) { return { code: e.code, stdout: e.stdout || '', stderr: e.stderr || '' }; } }
   async function cli(command, ...args) { const p = await raw(command, ...args); assert.equal(p.code, 0, p.stderr + p.stdout); return p.stdout.trim() ? JSON.parse(p.stdout) : null; }
   const state = async ident => (await cli('status', ident))[0];
-  const start = (ident, prompt, ...args) => cli('start', ident, '--codex', FAKE, '--prompt', prompt, ...args);
+  const start = (ident, prompt, ...args) => cli('start', ident, '--codex', FAKE, '--notify', 'off', '--prompt', prompt, ...args);
   const wait = ident => cli('wait', ident, '--timeout', '5');
   t.after(async () => {
     const base = path.join(repo, '.git/parallel-worktrees');
     if (fs.existsSync(base)) {
+      if (fs.existsSync(path.join(base, 'root-parent.json'))) await raw('unbind-parent');
       const states = fs.readdirSync(base).filter(n => fs.existsSync(path.join(base, n, 'state.json'))).map(n => JSON.parse(fs.readFileSync(path.join(base, n, 'state.json'))));
       for (const s of states.sort((a, b) => b.depth - a.depth)) await raw('stop', s.id);
     }
     await sleep(100); fs.rmSync(temp, { recursive: true, force: true });
   });
   return { repo, git, raw, cli, state, start, wait };
+}
+async function eventually(check, timeout = 7000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) { const value = await check(); if (value) return value; await sleep(30); }
+  assert.fail('Condition did not become true before deadline');
+}
+async function delivered(h, ident, count = 1) {
+  return eventually(async () => { const n = (await h.cli('notifications', ident))[0]; return n.inbox.length === count && n.inbox.every(r => r.state === 'delivered') ? n : null; });
 }
 test('parallel chips: isolation, steer, same-session follow-up, merge and cleanup', async t => {
   const h = await setup(t); const a = await h.start('alpha', 'SLOW\nMAKE alpha.txt a'); const b = await h.start('beta', 'SLOW\nMAKE beta.txt b');
@@ -120,4 +130,73 @@ test('fast completion, crash, interrupt and bounded waits are distinct', async t
 test('doctor has no chip/model turn and sandbox wire aliases normalize', async t => {
   const h = await setup(t); const d = await h.cli('doctor', '--codex', FAKE, '--probe'); assert.equal(d.initialize, 'ok'); assert.ok(d.node); assert.equal((await h.cli('status')).length, 0);
   const s = await h.start('sandbox', 'FAST', '--sandbox', 'workspaceWrite'); assert.equal(s.sandbox, 'workspace-write'); await h.wait('sandbox');
+});
+test('idle parent is automatically started by child completion without parent polling', async t => {
+  const h = await setup(t); const parent = await h.start('parent', 'FAST', '--notify', 'on'); await h.wait('parent');
+  const child = await h.cli('start', 'child', '--parent', 'parent', '--prompt', 'FAST');
+  const inbox = await delivered(h, 'parent'); assert.equal(inbox.inbox[0].method, 'turn/start');
+  const state = await h.state('parent'); assert.notEqual(state.turn_id, parent.turn_id); assert.equal(state.thread_id, parent.thread_id);
+  await h.wait('parent'); assert.ok((await h.state('parent')).last_message.includes('[하위칩 완료 알림]'));
+  const out = (await h.cli('notifications', 'child'))[0].outbox[0]; assert.equal(out.state, 'accepted'); assert.equal(out.event.child_thread_id, child.thread_id);
+});
+test('active parent receives steer and duplicate completion does not create another turn', async t => {
+  const h = await setup(t); const parent = await h.start('parent', 'SLOW', '--notify', 'on');
+  await h.cli('start', 'child', '--parent', 'parent', '--prompt', 'FAST');
+  const notice = await delivered(h, 'parent'); assert.equal(notice.inbox[0].method, 'turn/steer');
+  const out = (await h.cli('notifications', 'child'))[0].outbox[0];
+  const reply = await control(path.dirname(parent.worktree), { op: 'child-completed', event: out.event }); assert.equal(reply.duplicate, true);
+  await h.wait('parent'); assert.equal((await h.state('parent')).turn_id, parent.turn_id);
+  assert.equal((await h.cli('notifications', 'parent'))[0].inbox.length, 1);
+});
+test('approval waits are preserved; queued child completions wake parent as one batch', async t => {
+  const h = await setup(t); await h.start('parent', 'APPROVE', '--notify', 'on');
+  await h.cli('start', 'a', '--parent', 'parent', '--prompt', 'FAST'); await h.cli('start', 'b', '--parent', 'parent', '--prompt', 'FAST');
+  await eventually(async () => (await h.cli('notifications', 'parent'))[0].inbox.length === 2);
+  const pending = await h.state('parent'); assert.equal(pending.status, 'waiting_for_input'); assert.equal(pending.pending_requests.length, 1);
+  assert.ok((await h.cli('notifications', 'parent'))[0].inbox.every(r => r.state === 'queued'));
+  await h.cli('respond', 'parent', '900', '--decision', 'accept');
+  const n = await delivered(h, 'parent', 2); assert.equal(new Set(n.inbox.map(r => r.accepted_turn_id)).size, 1); assert.equal(n.inbox[0].method, 'turn/start');
+  await h.wait('parent'); assert.equal((await h.state('parent')).turn_id, 'turn-2');
+});
+test('completion/steer race safely starts a new turn after explicit rejection', async t => {
+  const h = await setup(t); await h.start('parent', 'SLOW COMPLETE_BEFORE_STEER', '--notify', 'on');
+  await h.cli('start', 'child', '--parent', 'parent', '--prompt', 'FAST');
+  const n = await delivered(h, 'parent'); assert.equal(n.inbox[0].method, 'turn/start'); await h.wait('parent');
+  assert.equal((await h.state('parent')).turn_id, 'turn-2');
+});
+test('failed child turn notifies parent; user-initiated stop does not spuriously wake it', async t => {
+  const h = await setup(t); const p = await h.start('parent', 'FAST', '--notify', 'on'); await h.wait('parent');
+  await h.cli('start', 'failed', '--parent', 'parent', '--prompt', 'APPROVE'); await h.cli('respond', 'failed', '900', '--decision', 'decline');
+  const n = await delivered(h, 'parent'); assert.equal(n.inbox[0].event.status, 'failed');
+  const q = await h.start('quiet', 'FAST', '--notify', 'on'); await h.wait('quiet');
+  await h.cli('start', 'stopped', '--parent', 'quiet', '--prompt', 'SLOW'); await h.cli('stop', 'stopped');
+  await sleep(100); assert.equal((await h.state('quiet')).turn_id, q.turn_id); assert.equal((await h.cli('notifications', 'quiet'))[0].inbox.length, 0);
+});
+test('unreachable parent is recorded as failed delivery with bounded attempts', async t => {
+  const h = await setup(t); const p = await h.start('parent', 'FAST', '--notify', 'on'); await h.wait('parent'); await h.cli('stop', 'parent');
+  await h.cli('start', 'child', '--parent', 'parent', '--prompt', 'FAST');
+  const row = await eventually(async () => { const r = (await h.cli('notifications', 'child'))[0].outbox[0]; return r?.state === 'failed' && r.attempts === 3 ? r : null; });
+  assert.equal(row.state, 'failed'); assert.equal((await h.state('parent')).turn_id, p.turn_id); assert.ok(fs.existsSync(path.join(h.repo, '.git/parallel-worktrees/child/worktree')));
+});
+test('unregistered top-level parent is explicit; notify off remains a wait/status workflow', async t => {
+  const h = await setup(t); await h.start('unbound', 'FAST', '--notify', 'on'); await h.wait('unbound');
+  assert.equal((await h.cli('notifications', 'unbound'))[0].outbox[0].state, 'unconfigured');
+  const p = await h.start('off', 'FAST'); await h.wait('off'); await h.cli('start', 'child', '--parent', 'off', '--prompt', 'FAST'); await h.wait('child');
+  assert.equal((await h.state('off')).turn_id, p.turn_id); assert.equal((await h.cli('notifications', 'child'))[0].outbox.length, 0);
+});
+test('registered external parent wakes without managed parent_id and unbind leaves its server alive', async t => {
+  const h = await setup(t); const p = await h.start('external', 'FAST'); await h.wait('external');
+  await h.cli('bind-parent', '--remote', 'unix://' + p.server_socket, '--session', p.thread_id, '--codex', FAKE);
+  const child = await h.start('root-child', 'FAST', '--notify', 'on'); assert.equal(child.parent_id, null);
+  await eventually(async () => (await h.state('external')).turn_id !== p.turn_id); await h.wait('external');
+  assert.ok((await h.state('external')).last_message.includes('root-child'));
+  const notices = await h.cli('notifications'); const bridge = notices.find(n => n.chip === '$root'); assert.equal(bridge.inbox[0].state, 'delivered');
+  assert.equal((await h.cli('notify-retry', '$root')).retried, 0);
+  assert.equal((await h.cli('bind-parent')).state.worktree, p.worktree);
+  const unbound = await h.cli('unbind-parent'); assert.equal(unbound.parent_untouched, true); assert.equal((await h.cli('message', 'external', '--prompt', 'FAST still alive')).thread_id, p.thread_id);
+});
+test('completion notifier also reports an app-server crash instead of silently losing it', async t => {
+  const h = await setup(t); await h.start('parent', 'FAST', '--notify', 'on'); await h.wait('parent');
+  assert.notEqual((await h.raw('start', 'crash-child', '--parent', 'parent', '--prompt', 'CRASH')).code, 0);
+  const n = await delivered(h, 'parent'); assert.equal(n.inbox[0].event.status, 'failed');
 });

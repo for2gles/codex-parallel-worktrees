@@ -1,6 +1,6 @@
 ---
 name: parallel-worktrees
-description: Create and coordinate independent Codex sessions called 하위칩 in mandatory separate Git worktrees, including nested child chips, live terminal access, follow-up instructions and bottom-up integration. Use for independent coding sessions or parallel worktrees rather than shared-directory subagents.
+description: Create and coordinate independent Codex sessions called 하위칩 in mandatory separate Git worktrees, with nested chips, live terminal access, completion push that resumes idle parents, and bottom-up integration. Use for independent coding sessions or parallel worktrees rather than shared-directory subagents.
 ---
 
 # 하위칩 / Parallel Worktrees
@@ -36,10 +36,16 @@ this skill's actual directory; use `--repo` to locate the project registry.
    model and requested sandbox unless explicitly overridden. IDs are globally
    unique within one repository; use meaningful names such as `api-db`.
    Children may delegate concrete independent subtasks further in the same way.
-5. Keep coordinating: `status.sh`, bounded `wait.sh`, and `message.sh` deliver
-   progress, completion and follow-ups. `wait PARENT` includes its descendants.
-   Do not end a parent turn merely because children started. Read output, verify
-   checks and inspect diffs; a completed turn is not proof of correct implementation.
+5. Child turn completion/failure is pushed automatically to its immediate parent.
+   A running parent receives `turn/steer`; an idle parent gets a new `turn/start`
+   in the SAME session. The server and controller must stay alive. Approval/input
+   waits retain notifications without approving anything. A parent can finish its
+   current response while children work; polling is not required for completion
+   delivery. `status.sh`, bounded `wait.sh` and `message.sh` remain available.
+   `wait PARENT` includes descendants. Read results, checks and diffs; a completed
+   turn is not proof of correct implementation. Handle event IDs idempotently.
+   Inspect `notifications.sh` when delivery fails; never blindly replay ambiguous
+   model input. `--notify off` opts into manual coordination and is inherited.
 6. Expose each chip's ID, parent, session ID and worktree to the user. `list.sh`
    shows the hierarchy and copyable open commands; `remote.sh ID` prints the
    remote URI, session ID and full commands. `attach.sh ID` opens the SAME live
@@ -48,6 +54,18 @@ this skill's actual directory; use `--repo` to locate the project registry.
 7. Surface `pending_requests` to the user. Use `respond.sh` only for authorized
    decisions or explicit user answers; never auto-approve requests or invent
    answers. A timeout can mean input was accepted: inspect state before retrying.
+
+## Connect an existing top-level parent
+
+Managed parent/child chips connect automatically. To send a top-level chip's
+result to an existing external parent, run `bind-parent.sh --repo REPO --remote
+unix:///ABS_SOCKET --session SESSION_ID` BEFORE creating the chip. Use only the
+intended, authorized parent and its accessible live App Server endpoint. This
+subscribes to that session without starting a model turn. Never guess another
+chat's endpoint or claim that a session ID alone enables Desktop notification.
+Without this binding, top-level completion is explicitly `unconfigured`.
+`unbind-parent.sh` disconnects only this notification adapter, leaving the parent
+server and current turn running. Do not use it until required results are received.
 
 ## Integrate from the leaves upward
 
@@ -66,5 +84,6 @@ stopping a parent. Never force-delete worktrees or reset user changes.
 Run combined project checks at the final integration target and report actual
 results. Worktrees, branches and logs are independent; Git worktree separation
 is not a security boundary. Runtime records stay in Git's private directory and
-must not be published. This helper sends no messages to other desktop chats,
-creates no sidebar chats, publishes nothing and does not wake an ended parent chat.
+must not be published. The helper creates no sidebar chats and publishes nothing.
+It resumes an idle connected parent session, but cannot restart a stopped server
+or inject into an arbitrary Desktop chat without a supported accessible endpoint.

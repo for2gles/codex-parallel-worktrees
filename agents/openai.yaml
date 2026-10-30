@@ -1,3 +1,3 @@
 interface:
   display_name: "하위칩 / Parallel Worktrees"
-  short_description: "독립 세션·별도 Worktree·재귀 하위칩·터미널 접속 관리"
+  short_description: "독립 세션·별도 Worktree·완료 PUSH·상위 자동 재개"
