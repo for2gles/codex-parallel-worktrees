@@ -102,6 +102,29 @@ Nested chip creation follows the same app-only procedure and needs the human's
 authorization for further separate chats. Start from its immediate parent's
 authorized committed state and preserve its immediate-parent relationship.
 
+## Main chat must remain available
+
+The main chat MUST NOT wait for a chip's work to finish. Do not call
+`wait_threads` with a positive timeout on child work, run status/sleep loops,
+or wait for a notification helper to return. Dispatch the authorized work,
+record actual creation IDs/ownership, and continue independent work or finish
+the foreground response. A one-off `timeoutMs: 0` snapshot is permitted for
+inspection; it must not become a polling loop. An explicit later human request
+to wait/collect results may override this default.
+
+The human authorizes delegating notification waiting to an INTERNAL subagent
+when available. A completing chip may assign its already-verified parent
+notification route to a narrow notification subagent that does no coding or
+new delegation. That helper may use bounded event waits and send the existing
+completion report when the main chat is idle. Do not create a new user-owned
+app chat just to simulate this helper. Never make the main agent wait for it.
+
+Delegation does not prove detached lifetime. Until the host has demonstrated
+that the helper survives the completing chip's final response, do not close that
+chip relying on an untested helper. The completing chip itself may keep the
+notification wait; the main chat stays free in either case. This is separation
+of waiting, not a claim of polling-free or guaranteed after-turn delivery.
+
 ## Completion means user-visible reporting
 
 When assigned work is finished, write a brief result and record it using
@@ -141,9 +164,9 @@ do not merely repeat that internal blocker as the task outcome. A verified grant
 covers completion/failure summaries to that parent only, not arbitrary cross-chat
 messages, chat reopening, or new tasks. Explicit user revocation takes precedence.
 
-The main chat should finish its foreground turn after dispatching chips rather
-than waiting indefinitely for children that are waiting for it to become idle.
-The completing chip remains responsible for the event wait and native send.
+The main chat finishes or continues independent work after dispatch; it does
+not await child completion. The completing chip or its supported notification
+helper is responsible for the event wait and native send.
 If it is interrupted or reaches a limit, the disk queue survives but no detached
 dispatcher exists to wake the main chat. Report this limitation; never promise
 delivery after every agent has stopped.
