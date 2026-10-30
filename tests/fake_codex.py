@@ -13,6 +13,11 @@ if "--version" in sys.argv:
     print("fake-codex 1.0")
     sys.exit(0)
 
+if "--listen" in sys.argv:
+    from fake_listener import run
+    run(sys.argv[sys.argv.index("--listen") + 1])
+    sys.exit(0)
+
 def send(message):
     print(json.dumps(message), flush=True)
 
@@ -64,7 +69,7 @@ while True:
             if params.get("sandbox") not in (None, "read-only", "workspace-write"):
                 send({"id":ident,"error":{"code":-32600,"message":"Invalid sandbox mode"}})
                 continue
-            result = {"thread": {"id": thread_id}, "model": "fake",
+            result = {"thread": {"id": thread_id, "cwd": str(Path.cwd())}, "model": "fake",
                       "sandbox": {"type": "workspaceWrite"}, "approvalPolicy": "onRequest"}
         elif method == "turn/start":
             number += 1

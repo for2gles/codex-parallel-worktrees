@@ -18,7 +18,7 @@ bash "$S/cleanup.sh" api --repo "$R"
 bash "$S/cleanup.sh" ui --repo "$R"
 ```
 
-`doctor --probe` checks the local socket and performs the app-server handshake; it spends no model tokens.
+`doctor --probe` checks the local socket and performs the Unix WebSocket app-server handshake; it spends no model tokens.
 It does not prove model access, editing, steering or Cofa compatibility. `start`
 accepts `--codex /existing/executable` and optional `--model MODEL`; otherwise it
 uses PATH and the CLI's configured model. It never upgrades anything. No sandbox,
@@ -50,6 +50,51 @@ and returns early when any worker needs input. Exit codes:
 model turn, not a successful implementation/test run. Always review the diff.
 An RPC timeout is ambiguous: check state and events before deciding to resend.
 
+## Inspect the same session from another terminal
+
+Every worker has a mandatory separate registered Git worktree and branch. `status`
+includes `id`, `thread_id`, `worktree`, `branch`, `server_socket` and a copyable
+`terminal_command`. To open a worker's existing session in another terminal:
+
+```bash
+bash "$S/attach.sh" api --repo "$R"
+```
+
+This runs the worker's own CLI as:
+
+```text
+codex resume --remote unix://WORKER_SOCKET --cd WORKER_WORKTREE SESSION_ID
+```
+
+It connects to the SAME running app-server and session; it does not create/fork
+a session or share another worker's directory. It works during an active turn
+and after completion while the controller remains alive. The TUI can send input
+to that session; the parent continues tracking those turns. Normal Codex folder
+trust/approval prompts may appear. Resolve them normally without bypass flags.
+
+For observation without interacting with Codex:
+
+```bash
+bash "$S/watch.sh" api --repo "$R"
+# Optional bounded observation, useful in scripts:
+bash "$S/watch.sh" api --repo "$R" --timeout 10 --interval 0.5
+# Print the exact same-server TUI command:
+bash "$S/attach.sh" api --repo "$R" --print
+```
+
+`watch` shows session/path/branch, state transitions and model output, and never
+starts a turn. Ctrl-C closes the watcher only. It can also read preserved output
+after a worker is stopped. `attach` needs an interactive terminal (or `--print`).
+Use the TUI's normal exit when finished; close it before merging/cleaning a worker.
+`merge`/`stop` closes the worker server, so a connected TUI loses its connection.
+After `cleanup`, that worktree no longer exists. No automatic recovery/replay is
+provided for a stopped controller.
+
+Only use the printed `--remote unix://...` resume command for a running worker.
+A plain local `codex resume SESSION_ID` can create a competing server-side owner.
+The local Unix endpoint is protected by a private user directory and mode 0600;
+no TCP port is opened. Runtime logs and absolute paths must not be published.
+
 ## Responding to requests
 
 Show the full pending method/params to the user. For an explicitly authorized
@@ -74,7 +119,7 @@ bash "$S/stop.sh" api --repo "$R"
 
 Stop interrupts an active turn, waits for confirmation, and closes its owned
 app-server process. It does not signal arbitrary PIDs loaded from disk. Stopped
-controllers cannot receive `message`; inspect the preserved thread/worktree and
+controllers cannot receive `message` or `attach`; inspect the preserved thread/worktree and
 continue manually with the supplied CLI if necessary. A crashed controller is
 reported as disconnected; no automatic restart/replay occurs. Worker IDs are not
 reused and failed worktrees/branches are retained for diagnosis.
@@ -104,6 +149,8 @@ From the skill directory:
 python3 -m unittest discover -s tests -v
 ```
 
-These tests use a fake JSONL app-server and real temporary Git repositories.
+These tests use an independent fake Unix WebSocket app-server with a deterministic
+JSONL backend, plus real temporary Git repositories. Transport tests also cover
+fragmentation, ping/pong, masking and length limits.
 They exercise orchestration and Git invariants, not model behavior. A separate
 real CLI smoke test is required for actual provider/version compatibility.

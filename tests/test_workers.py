@@ -1,7 +1,9 @@
 import json
+import asyncio
 import os
 from pathlib import Path
 import subprocess
+import shlex
 import sys
 import tempfile
 import time
@@ -10,6 +12,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/workers.py"
 FAKE = ROOT / "tests/fake_codex.py"
+sys.path.insert(0, str(ROOT / "scripts"))
+from unix_ws import UnixWebSocket
 
 
 class IntegrationTests(unittest.TestCase):
@@ -171,6 +175,70 @@ class IntegrationTests(unittest.TestCase):
                 p = self.run_cli("start", ident, "--codex", str(FAKE), "--sandbox", mode, "--prompt", "FAST")
                 self.assertEqual(json.loads(p.stdout)["sandbox"], "workspace-write")
                 self.wait(ident)
+
+    def test_attach_command_uses_same_server_thread_and_worktree(self):
+        state = self.start("attachable", "SLOW")
+        p = self.run_cli("attach", "attachable", "--print")
+        argv = shlex.split(p.stdout.strip())
+        self.assertEqual(argv, [state["codex"], "resume", "--remote", "unix://" + state["server_socket"],
+                               "--cd", state["worktree"], state["thread_id"]])
+        self.assertNotIn("--worktree", argv)
+        self.assertEqual(self.state("attachable")["turn_id"], state["turn_id"])
+        mode = os.stat(state["server_socket"]).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
+    def test_external_client_observes_same_running_session(self):
+        state = self.start("observer", "SLOW")
+        async def observe():
+            ws = await UnixWebSocket.connect(state["server_socket"])
+            async def rpc(ident, method, params):
+                await ws.send({"id": ident, "method": method, "params": params})
+                while True:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=5)
+                    if msg.get("id") == ident:
+                        return msg["result"]
+            try:
+                await rpc(1, "initialize", {"clientInfo": {"name":"observer","version":"test"}})
+                await ws.send({"method":"initialized","params":{}})
+                result = await rpc(2, "thread/resume", {"threadId":state["thread_id"]})
+                self.assertEqual(result["thread"]["id"], state["thread_id"])
+                self.assertEqual(result["thread"]["cwd"], state["worktree"])
+                self.run_cli("message", "observer", "--prompt", "Observation remains connected")
+                while True:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=5)
+                    if msg.get("method") == "turn/completed":
+                        self.assertEqual(msg["params"]["threadId"], state["thread_id"])
+                        break
+                result = await rpc(3, "turn/start", {"threadId":state["thread_id"],
+                    "input":[{"type":"text","text":"SLOW external follow-up"}]})
+                tracked = self.state("observer")
+                self.assertEqual(tracked["turn_id"], result["turn"]["id"])
+                self.assertEqual(tracked["last_message"], "")
+                self.assertNotIn("completed_at", tracked)
+                while True:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=5)
+                    if msg.get("method") == "turn/completed":
+                        self.assertEqual(msg["params"]["turn"]["id"], result["turn"]["id"])
+                        break
+            finally:
+                await ws.close()
+        asyncio.run(observe())
+        self.assertEqual(self.state("observer")["status"], "completed")
+
+    def test_watch_from_another_process_is_read_only(self):
+        state = self.start("watched", "SLOW")
+        p = self.run_cli("watch", "watched", "--timeout", "0.2", "--interval", "0.05")
+        self.assertIn(state["thread_id"], p.stdout)
+        self.assertIn(state["worktree"], p.stdout)
+        self.assertEqual(self.state("watched")["turn_id"], state["turn_id"])
+
+    def test_attach_rejects_replaced_worktree_branch(self):
+        state = self.start("replaced", "FAST")
+        self.wait("replaced")
+        self.git("checkout", "-qb", "unexpected", cwd=state["worktree"])
+        p = self.run_cli("attach", "replaced", "--print", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("branch changed", p.stderr)
 
 
 if __name__ == "__main__":

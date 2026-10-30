@@ -5,8 +5,9 @@ compatibility with every Codex version or assessment environment.
 
 ## Automated orchestration checks
 
-13 integration tests passed on both Python 3.9.6 and Python 3.15.1 using real
-temporary Git repositories and a deterministic fake app-server:
+21 tests passed on both Python 3.9.6 and Python 3.15.1, comprising 17 integration
+tests with real temporary Git repositories and an independent fake app-server,
+plus four WebSocket transport tests:
 
 - Independent worker processes, thread IDs and worktrees.
 - Steering an active turn and starting a follow-up turn in the same thread.
@@ -17,6 +18,11 @@ temporary Git repositories and a deterministic fake app-server:
 - Git merge conflicts left intact for manual resolution.
 - Socket/app-server handshake without starting a model turn.
 - Explicit sandbox mode normalization and protocol validation.
+- Same-server terminal command construction, private socket permissions, external
+  client observation, externally started turns, read-only watching and worktree
+  branch validation.
+- Fragmented text with interleaved ping/pong, long masked client messages,
+  oversized inbound frames and invalid server masking.
 
 The skill-creator frontmatter/scaffold validator passed. The runtime itself
 requires no third-party Python packages.
@@ -67,6 +73,28 @@ Verified its SHA-256 against the release asset digest:
   removed the worktrees and confirmed the original checkout was clean.
 
 The compatibility test used the same configured gpt-6.1-sol model and Python 3.15.1.
+
+## v0.2.0: separate-terminal attachment (0.163.0 and 0.164.0)
+
+- Switched worker transport from exclusive stdio to a private Unix WebSocket
+  endpoint, which both the controller and Codex TUI can connect to simultaneously.
+  It uses the Python standard library and opens no TCP port.
+- Started distinct 0.163.0 and 0.164.0 server processes with independent threads,
+  branches and registered Git worktrees from the same disposable original checkout.
+- Opened `attach.sh` in two separate PTY terminals. Both real Codex TUIs resumed
+  their intended session and displayed its worktree, original prompt, command
+  activity and output. The 0.164.0 TUI observed the original in-flight turn.
+- Checked session, turn and worktree IDs before/after attachment: all were
+  unchanged. Attachment did not fork a conversation or restart a turn.
+- Submitted a short no-tools follow-up from each TUI. Both answers appeared in
+  the TUI and in the main controller's state under their original thread IDs.
+- Exited each TUI normally with `/exit`. Both reported disconnection while work
+  continued; the controller then started another turn on each same session.
+- Watcher subprocesses and automatic integration tests verify read-only inspection;
+  changed worktree branches are rejected rather than silently attaching elsewhere.
+
+These terminal checks are specific to macOS arm64 with the two actual CLI versions.
+The Cofa execution environment has still not been accessed.
 
 ## Limits
 

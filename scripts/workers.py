@@ -9,14 +9,16 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+from unix_ws import UnixWebSocket
 
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 ACTIVE = {"starting", "running", "waiting_for_input"}
 TERMINAL = {"completed", "failed", "interrupted", "disconnected", "stopped"}
 APPROVALS = {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}
@@ -70,6 +72,52 @@ def socket_path(folder):
         raise RuntimeError("Unsafe runtime directory")
     os.chmod(parent, 0o700)
     return parent / (digest + ".sock")
+
+
+def server_socket_path(folder):
+    return socket_path(folder / "app-server")
+
+
+def validate_worktree(state):
+    tree = Path(state["worktree"]).resolve()
+    if tree == Path(state["repo"]).resolve():
+        raise RuntimeError("Each worker must have a separate Git worktree")
+    actual = Path(git(tree, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
+    if actual != tree or not (tree / ".git").is_file():
+        raise RuntimeError("Worker path is not its own registered Git worktree")
+    if git(tree, "symbolic-ref", "--short", "HEAD").stdout.strip() != state["branch"]:
+        raise RuntimeError("Worker branch changed unexpectedly")
+
+
+def terminal_argv(state):
+    if not state.get("server_socket") or not state.get("thread_id"):
+        raise RuntimeError("Worker does not expose an attachable session; start it with v0.2.0+")
+    return [state["codex"], "resume", "--remote", "unix://" + state["server_socket"],
+            "--cd", state["worktree"], state["thread_id"]]
+
+
+async def open_app_server(codex, cwd, path, stderr):
+    if path.exists():
+        raise RuntimeError("App-server socket already exists; inspect the existing worker")
+    proc = await asyncio.create_subprocess_exec(codex, "app-server", "--listen", "unix://" + str(path),
+            cwd=str(cwd), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=stderr)
+    try:
+        deadline = time.monotonic() + 15
+        while not path.exists():
+            if proc.returncode is not None:
+                raise RuntimeError("Codex app-server exited before opening its Unix socket")
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Codex app-server socket startup timed out")
+            await asyncio.sleep(0.05)
+        os.chmod(path, 0o600)
+        ws = await UnixWebSocket.connect(path)
+        return proc, ws
+    except BaseException:
+        if proc.returncode is None:
+            proc.terminate()
+            await proc.wait()
+        path.unlink(missing_ok=True)
+        raise
 
 
 def control(folder, request, timeout=40):
@@ -145,6 +193,7 @@ class Worker:
         self.folder = folder
         self.state = read_state(folder)
         self.proc = None
+        self.ws = None
         self.pending = {}
         self.counter = 0
         self.stop_event = asyncio.Event()
@@ -162,8 +211,7 @@ class Worker:
             f.write(json.dumps({"time": time.time(), **message}, ensure_ascii=False) + "\n")
 
     async def send(self, message):
-        self.proc.stdin.write(json.dumps(message).encode() + b"\n")
-        await self.proc.stdin.drain()
+        await self.ws.send(message)
 
     async def rpc(self, method, params):
         self.counter += 1
@@ -181,7 +229,9 @@ class Worker:
         params = message.get("params", {})
         self.record(message)
         if method == "turn/started":
-            self.state.update(turn_id=params["turn"]["id"], status="running", error=None)
+            self.state.update(turn_id=params["turn"]["id"], status="running", error=None,
+                              last_message="", pending_requests=[])
+            self.state.pop("completed_at", None)
         elif method == "turn/completed":
             turn = params["turn"]
             self.state.update(turn_id=turn["id"], status=turn["status"], error=turn.get("error"))
@@ -204,14 +254,7 @@ class Worker:
     async def read_loop(self):
         try:
             while True:
-                line = await self.proc.stdout.readline()
-                if not line:
-                    raise RuntimeError("Codex app-server closed stdout")
-                try:
-                    message = json.loads(line)
-                except ValueError:
-                    self.record({"unparsed_stdout": line.decode(errors="replace")})
-                    continue
+                message = await self.ws.receive()
                 if "method" in message and "id" in message:
                     # No automatic approvals or implicit answers, including unknown methods.
                     self.state["pending_requests"].append(message)
@@ -315,13 +358,16 @@ class Worker:
         server = await asyncio.start_unix_server(self.client, path=str(path), limit=MAX_MESSAGE)
         os.chmod(path, 0o600)
         try:
+            validate_worktree(self.state)
             self.state.update(status="starting", pending_requests=[], controller_pid=os.getpid())
             self.save()
             self.stderr_file = (self.folder / "app-server.stderr.log").open("ab")
-            self.proc = await asyncio.create_subprocess_exec(self.state["codex"], "app-server",
-                       cwd=self.state["worktree"], stdin=asyncio.subprocess.PIPE,
-                       stdout=asyncio.subprocess.PIPE, stderr=self.stderr_file, limit=MAX_MESSAGE)
+            server_path = server_socket_path(self.folder)
+            self.proc, self.ws = await open_app_server(self.state["codex"], self.state["worktree"],
+                                                      server_path, self.stderr_file)
             self.state["app_server_pid"] = self.proc.pid
+            self.state["server_socket"] = str(server_path)
+            self.state["transport"] = "unix-websocket"
             self.reader_task = asyncio.create_task(self.read_loop())
             init = await self.rpc("initialize", {"clientInfo": {"name": "parallel_worktrees",
                                   "title": "Parallel Worktrees", "version": VERSION}})
@@ -338,6 +384,10 @@ class Worker:
             else:
                 result = await self.rpc("thread/start", params)
             self.state["thread_id"] = result["thread"]["id"]
+            returned_cwd = result["thread"].get("cwd")
+            if returned_cwd and Path(returned_cwd).resolve() != Path(self.state["worktree"]).resolve():
+                raise RuntimeError("Codex session cwd does not match its mandatory worktree")
+            self.state["terminal_command"] = shlex.join(terminal_argv(self.state))
             self.state["effective_policy"] = {k: result[k] for k in
                 ("approvalPolicy", "approvalsReviewer", "sandbox", "model") if k in result}
             self.ready = True
@@ -349,6 +399,9 @@ class Worker:
         finally:
             server.close()
             await server.wait_closed()
+            if self.ws is not None:
+                with contextlib.suppress(Exception):
+                    await self.ws.close()
             if self.proc is not None:
                 if self.proc.returncode is None:
                     self.proc.terminate()
@@ -365,9 +418,11 @@ class Worker:
                 self.state["status"] = "stopped"
             self.save()
             path.unlink(missing_ok=True)
+            server_socket_path(self.folder).unlink(missing_ok=True)
 
 
 def daemon(folder):
+    os.umask(0o077)
     folder = Path(folder)
     with (folder / "daemon.lock").open("w") as lock:
         try:
@@ -397,7 +452,7 @@ def parser():
     sub = p.add_subparsers(dest="command", required=True)
     d = sub.add_parser("_daemon", help=argparse.SUPPRESS)
     d.add_argument("folder")
-    for name in ("start", "status", "message", "wait", "respond", "stop", "merge", "cleanup", "doctor"):
+    for name in ("start", "status", "message", "wait", "respond", "stop", "merge", "cleanup", "doctor", "attach", "watch"):
         s = sub.add_parser(name)
         s.add_argument("--repo", default=".", help="Repository (run from original worktree)")
         if name not in {"doctor", "status", "wait"}:
@@ -418,6 +473,11 @@ def parser():
                            help="Optional normal Codex sandbox mode; host requirements still apply")
         if name == "wait":
             s.add_argument("--timeout", type=float, default=30, help="Bounded wait, seconds")
+        if name == "attach":
+            s.add_argument("--print", action="store_true", dest="print_command", help="Print the same-server TUI command")
+        if name == "watch":
+            s.add_argument("--interval", type=float, default=0.5)
+            s.add_argument("--timeout", type=float, default=0, help="0 follows until Ctrl-C")
         if name == "respond":
             s.add_argument("request_id")
             group = s.add_mutually_exclusive_group(required=True)
@@ -427,25 +487,20 @@ def parser():
 
 
 async def probe(codex, repo):
-    proc = await asyncio.create_subprocess_exec(codex, "app-server", cwd=str(repo),
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, limit=MAX_MESSAGE)
+    path = server_socket_path(repo / ("probe-" + os.urandom(6).hex()))
+    proc, ws = await open_app_server(codex, repo, path, asyncio.subprocess.DEVNULL)
     try:
-        proc.stdin.write((json.dumps({"id": 1, "method": "initialize", "params": {
-            "clientInfo": {"name": "parallel_worktrees", "version": VERSION}}}) + "\n").encode())
-        await proc.stdin.drain()
+        await ws.send({"id": 1, "method": "initialize", "params": {
+            "clientInfo": {"name": "parallel_worktrees", "version": VERSION}}})
         while True:
-            line = await asyncio.wait_for(proc.stdout.readline(), timeout=15)
-            if not line:
-                raise RuntimeError("app-server exited before initialize response")
-            msg = json.loads(line)
+            msg = await asyncio.wait_for(ws.receive(), timeout=15)
             if msg.get("id") == 1:
                 if "error" in msg:
                     raise RuntimeError(str(msg["error"]))
-                proc.stdin.write(b'{"method":"initialized","params":{}}\n')
-                await proc.stdin.drain()
-                return {"initialize": "ok", "server_info": msg.get("result")}
+                await ws.send({"method":"initialized","params":{}})
+                return {"initialize": "ok", "transport": "unix-websocket", "server_info": msg.get("result")}
     finally:
+        await ws.close()
         if proc.returncode is None:
             proc.terminate()
             try:
@@ -453,6 +508,7 @@ async def probe(codex, repo):
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
+        path.unlink(missing_ok=True)
 
 
 def main(argv=None):
@@ -503,6 +559,52 @@ def main(argv=None):
             time.sleep(0.2)
     ident = valid_id(args.id)
     folder = base / ident
+    if args.command == "attach":
+        state = control(folder, {"op":"status"})
+        validate_worktree(state)
+        argv = terminal_argv(state)
+        if not Path(state["server_socket"]).exists():
+            raise RuntimeError("Worker app-server is no longer running")
+        if args.print_command:
+            print(shlex.join(argv))
+            return 0
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            raise RuntimeError("Run attach.sh in an interactive terminal; use --print or watch.sh for inspection")
+        os.chdir(state["worktree"])
+        os.execv(argv[0], argv)
+    if args.command == "watch":
+        if args.interval <= 0 or args.timeout < 0:
+            raise RuntimeError("Watch interval must be positive and timeout nonnegative")
+        state = snapshot(folder)
+        print("Worker: " + ident + "\nSession: " + str(state.get("thread_id")) +
+              "\nWorktree: " + state["worktree"] + "\nBranch: " + state["branch"], flush=True)
+        previous = None
+        deadline = time.monotonic() + args.timeout if args.timeout else None
+        offset = 0
+        last_message = None
+        try:
+            while True:
+                state = snapshot(folder)
+                if previous != state["status"]:
+                    print("\n[" + state["status"] + "]", flush=True)
+                    previous = state["status"]
+                log = folder / "messages.log"
+                if log.exists():
+                    with log.open() as f:
+                        f.seek(offset)
+                        data = f.read()
+                        offset = f.tell()
+                    if data:
+                        print(data, end="", flush=True)
+                if state["status"] in TERMINAL and state.get("last_message") != last_message:
+                    last_message = state.get("last_message")
+                    if last_message:
+                        print("\n" + last_message, flush=True)
+                if deadline is not None and time.monotonic() >= deadline:
+                    return 0
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            return 0
     if args.command == "start":
         require_clean(root)
         codex = shutil.which(args.codex)

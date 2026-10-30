@@ -1,12 +1,13 @@
 ---
 name: parallel-worktrees
-description: Coordinate independent Codex CLI workers in isolated Git worktrees, send follow-up instructions, collect completion, and integrate their commits. Use when the user requests independent Codex sessions or parallel worktrees rather than ordinary shared-directory subagents.
+description: Coordinate independent Codex CLI workers in isolated Git worktrees, inspect their live sessions from other terminals, send follow-up instructions and integrate their commits. Use for independent Codex sessions or parallel worktrees rather than shared-directory subagents.
 ---
 
 # Parallel Worktrees
 
 Use the bundled shell commands to operate independent Codex app-server processes.
-Each worker has its own persistent thread and Git worktree. Requires an existing,
+Each worker MUST have its own persistent thread, branch and registered Git worktree;
+never run two workers in the original checkout or one shared worktree. Requires an existing,
 authenticated Codex CLI, Git and Python 3.9+ on macOS/Linux. No tmux or packages.
 
 Read [references/commands.md](references/commands.md) for exact commands, exit codes,
@@ -37,6 +38,13 @@ skill's actual directory; run commands with `--repo` pointing to the original ch
    `message.sh` steers an active turn or starts a follow-up turn on the same live
    thread after completion. Acknowledged steering means input was accepted, not
    that it has already been acted on. Verify subsequent output.
+   Give the user each worker's ID, session ID and worktree path. For inspection in
+   another terminal, provide `attach.sh ID --repo REPO` (the same live Codex TUI)
+   and `watch.sh ID --repo REPO` (read-only status/output). The attach helper uses
+   the worker's own CLI, Unix server endpoint and existing session ID, with the
+   exact worktree as cwd. Do not use a plain local `codex resume` against an active
+   worker: use the provided same-server command. Attaching must not fork the session
+   or create another worktree. Close attached TUIs before integration/cleanup.
 5. A `waiting_for_input` state includes the exact pending requests. Surface approvals
    and questions to the user; do not approve or fabricate an answer on the user's
    behalf. Use `respond.sh` only for an explicitly authorized decision or answer.
