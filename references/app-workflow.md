@@ -80,6 +80,38 @@ ID·소스·부모·허가 근거를 임의로 채우지 마세요. `register`�
 
 ## 완료와 큐
 
+### 원래 완료 보고 요청을 전달하기
+
+사용자가 이미 완료 결과를 메인으로 보내라고 요청했다면 그 허가는 해당 보고 경로에 계속 유효합니다.
+최신 작업 프롬프트에 같은 문장이 없다는 이유로 매번 허가를 새로 요구하지 않습니다.
+부모가 원문을 확인하지 않고 `직접 허가가 없으므로 큐에만 남겨라`라는 부정확한 제한을 넣지 마세요.
+
+```bash
+node "$A" report-policy --repo "$R"
+```
+
+개인 설정이 있으면 `$CODEX_HOME/parallel-worktrees/report-policy.json`의 원문 스레드·사용자 메시지 ID·조회 cursor를 반환합니다.
+이 파일은 사용자 요청을 찾는 참조이며 허가를 새로 만들어 주는 설정이 아닙니다. 실제 `read_thread`에서
+해당 원문 userMessage를 확인하고, 완료/실패 요약을 등록된 직접 부모에게 보내는 범위인지 판단합니다.
+에이전트 답변·전달 프롬프트·JSON 파일 자체를 사용자 허가로 바꾸지 마세요.
+
+확인한 실제 도구 결과를 비공개 evidence 파일로 저장한 뒤 그 칩의 정확한 부모 경로에 기록합니다.
+
+```bash
+node "$A" authorize-report api --repo "$R" \
+  --owner-thread CURRENT_PARENT_THREAD_ID --owner-host ACTUAL_HOST_ID \
+  --source-thread ORIGINAL_HUMAN_THREAD_ID --source-host ACTUAL_SOURCE_HOST_ID \
+  --source-message ORIGINAL_USER_MESSAGE_ID --evidence-file /absolute/read-thread-evidence.json
+node "$A" report-context api --repo "$R" \
+  --owner-thread CURRENT_PARENT_THREAD_ID --owner-host ACTUAL_HOST_ID
+```
+
+스크립트는 원문 대화·호스트·userMessage ID와 구조를 검사하고 정확한 부모에게만 범위를 고정합니다.
+내용이 실제로 허가하는 의미인지와 원문이 신뢰할 수 있는 앱 도구에서 왔는지는 호출자가 확인해야 합니다.
+digest는 서명이나 권한 승격 수단이 아닙니다. 원문 근거와 보고 범위를 자식의 초기 문맥에 넣고,
+자식도 원문을 한 번 확인한 뒤 같은 완료 보고에 재승인을 요구하지 않도록 합니다.
+개인 설정과 원문·대화 ID는 공개 저장소에 넣지 않습니다. 사용자가 철회했으면 이전 근거를 재사용하지 않습니다.
+
 작업이 끝난 칩이 완료 요약 파일을 쓰고 다음 명령을 호출합니다. 파일은 실행 기록 폴더 등 비공개 위치에 둡니다.
 
 ```bash
@@ -99,7 +131,9 @@ node "$A" claim --repo "$R" --parent-thread ACTUAL_PARENT_THREAD_ID \
 ```
 
 이 명령은 `delivery_id`, `tool: send_message_to_thread`, `arguments`를 반환합니다. 최대 16개씩 수신 순서대로 묶고,
-중복 claim은 거부합니다. 반환 직후 부모 상태와 직접적인 사용자 허가를 확인하고 실제 도구를 호출합니다.
+중복 claim은 거부합니다. 확인된 원문 근거는 `authorization_sources`로 전달되며, 새 승인을 매번 요구하지 않습니다.
+근거가 누락됐으면 claim은 `verify-existing-authorization`을 반환합니다. 원래 이력과 저장된 참조부터 확인하세요.
+반환 직후 부모 상태와 기존 허가의 경로·범위를 확인하고 실제 도구를 호출합니다.
 부모가 다시 바빠졌으면 보관한 `arguments`를 유지하고 기다립니다. 새 claim으로 이전 배치를 대체하지 마세요.
 native 도구의 응답을 파일로 저장하고 결과를 기록합니다.
 
@@ -115,6 +149,7 @@ node "$A" ack --repo "$R" --delivery ACTUAL_DELIVERY_ID \
 | accepted | 네이티브 도구가 입력을 수락. 사용자 보고 완료를 뜻하지 않음 |
 | failed | 입력 수락 전에 명확하게 거부됨 |
 | ambiguous | 시간 초과·연결 끊김 등으로 수락 여부 불명 |
+| held-archived | 사용자가 닫은 칩의 과거 미전송 결과. 자동 전송·재생하지 않음 |
 
 부모는 사용자에게 완료/실패·결과를 보고합니다. `wait_threads`의 실제 후속 응답이 보고 증거이며,
 `accepted`만 보고 성공으로 취급하지 않습니다. 모델 사용량 제한이나 실패는 성공 보고로 바꾸지 마세요.

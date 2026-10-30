@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const cp = require('node:child_process');
-const VERSION = '0.5.0-app.3';
+const os = require('node:os');
+const VERSION = '0.5.0-app.4';
 const MAX_SUMMARY = 6000;
 function git(repo, args) {
   const r = cp.spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8', maxBuffer: 8e6 });
@@ -31,6 +32,10 @@ function eventId(thread, turn) { return crypto.createHash('sha256').update(threa
 function ownerScope(o) { return { thread_id: ident(required(o, 'owner-thread'), 'owner thread'), host_id: ident(required(o, 'owner-host'), 'owner host') }; }
 function ownerKey(owner) { return crypto.createHash('sha256').update(JSON.stringify([owner.host_id, owner.thread_id])).digest('hex'); }
 function belongsTo(c, owner) { return c.parent_thread_id === owner.thread_id && c.parent_host_id === owner.host_id; }
+function reportAuthorization(c) {
+  const a = c?.report_authorization;
+  return a?.scope === 'assigned-work-completion-to-immediate-parent' && a.parent_thread_id === c.parent_thread_id && a.parent_host_id === c.parent_host_id ? a : null;
+}
 function ownedChip(s, o) {
   const c = s.chips[chipId(o.ids[0])]; if (!c) throw new Error('Chip not found in this repository');
   if (!belongsTo(c, ownerScope(o))) throw new Error('This chip belongs to a different parent session; do not send, adopt or unarchive it');
@@ -48,7 +53,7 @@ function rebuildOwners(s) {
 }
 function parse(argv) {
   const command = argv.shift(), o = { repo: '.', ids: [] };
-  const values = new Set(['repo', 'thread', 'host', 'worktree', 'source', 'parent', 'parent-thread', 'parent-host', 'authorization-thread', 'turn', 'status', 'summary-file', 'parent-state', 'delivery', 'receipt-file', 'event', 'owner-thread', 'owner-host', 'thread-state', 'message-file', 'title']);
+  const values = new Set(['repo', 'thread', 'host', 'worktree', 'source', 'parent', 'parent-thread', 'parent-host', 'authorization-thread', 'turn', 'status', 'summary-file', 'parent-state', 'delivery', 'receipt-file', 'event', 'owner-thread', 'owner-host', 'thread-state', 'message-file', 'title', 'source-thread', 'source-host', 'source-message', 'evidence-file']);
   while (argv.length) {
     const a = argv.shift();
     if (!a.startsWith('--')) { o.ids.push(a); continue; }
@@ -76,7 +81,11 @@ function execute(command, o) {
     const s = fs.existsSync(file) ? read(file) : { schema: 1, mode: 'app-native', sequence: 0, chips: {}, events: [], deliveries: {} };
     rebuildOwners(s);
     let out;
-    if (command === 'doctor') out = { version: VERSION, mode: 'app-native-only', node: process.versions.node, registry: r.folder, model_turn_started: false,
+    if (command === 'report-policy') {
+      const policyFile = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'parallel-worktrees', 'report-policy.json');
+      out = { path: policyFile, configured: fs.existsSync(policyFile), ...(fs.existsSync(policyFile) ? { policy: read(policyFile) } : {}),
+        note: 'A saved reference to human instructions, not a permission grant. Verify the original userMessage before recording a scoped completion authorization.' };
+    } else if (command === 'doctor') out = { version: VERSION, mode: 'app-native-only', node: process.versions.node, registry: r.folder, model_turn_started: false,
       required_app_tools: ['create_thread', 'create_worktree', 'read_thread', 'wait_threads', 'send_message_to_thread'],
       note: 'This checks the local ledger only. The calling agent must verify app-tool availability and authorization.' };
     else if (command === 'register') {
@@ -98,6 +107,27 @@ function execute(command, o) {
         parent_id: parent?.id || null, parent_thread_id: parentThread, parent_host_id: parentHost,
         authorization_thread_id: ident(required(o, 'authorization-thread'), 'authorization thread'),
         created_at: Date.now(), live_status: 'unknown', remote: null };
+    } else if (command === 'authorize-report') {
+      const c = ownedChip(s, o), raw = read(required(o, 'evidence-file'));
+      const evidence = raw.content ? JSON.parse(raw.content.find(b => b.type === 'text')?.text || '{}') : raw;
+      const thread = ident(required(o, 'source-thread'), 'source thread'), host = ident(required(o, 'source-host'), 'source host');
+      const message = ident(required(o, 'source-message'), 'source message');
+      if (evidence.thread?.id !== thread || evidence.thread?.hostId !== host || raw.isError) throw new Error('Evidence source does not match the requested human conversation');
+      let found;
+      for (const turn of evidence.turns || []) for (const item of turn.items || []) if (item.id === message) found = { turn, item };
+      if (!found || found.item.type !== 'userMessage') throw new Error('Completion-report evidence must identify an original human userMessage, not an agent/delegation message');
+      const quote = (found.item.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+      if (!quote.trim() || quote.length > 12000) throw new Error('Invalid human-request evidence text');
+      c.report_authorization = { scope: 'assigned-work-completion-to-immediate-parent',
+        parent_thread_id: c.parent_thread_id, parent_host_id: c.parent_host_id,
+        source_thread_id: thread, source_host_id: host, source_turn_id: found.turn.id, source_message_id: message,
+        quote, evidence_sha256: crypto.createHash('sha256').update(JSON.stringify(found.item)).digest('hex'), recorded_at: Date.now() };
+      out = { chip: c.id, report_authorization: c.report_authorization,
+        note: 'Records caller-verified human authorization for this exact completion route. The file/digest is not a signature or a new grant; verify meaning using trusted user history.' };
+    } else if (command === 'report-context') {
+      const c = ownedChip(s, o); out = { chip: c.id, parent_thread_id: c.parent_thread_id, parent_host_id: c.parent_host_id,
+        report_authorization: reportAuthorization(c),
+        note: 'Reuse verified human permission for this completion route; do not require a new per-result approval. A parent prompt alone never grants permission.' };
     } else if (command === 'owned') {
       const owner = ownerScope(o), all = Object.values(s.chips).filter(c => belongsTo(c, owner));
       if (!s.owners[ownerKey(owner)]) s.owners[ownerKey(owner)] = { ...owner, chip_ids: [] };
@@ -130,7 +160,9 @@ function execute(command, o) {
       const result = receipt.content ? JSON.parse(receipt.content.find(b => b.type === 'text')?.text || '{}') : receipt;
       const archived = command === 'archive-record';
       if (result.threadId !== c.thread_id || result.archived !== archived || receipt.isError) throw new Error('Receipt does not confirm the requested archive state of this exact chip');
-      c.lifecycle = archived ? 'archived' : 'active'; c.lifecycle_updated_at = Date.now(); out = { id: c.id, thread_id: c.thread_id, lifecycle: c.lifecycle };
+      c.lifecycle = archived ? 'archived' : 'active'; c.lifecycle_updated_at = Date.now();
+      if (archived) for (const row of s.events.filter(e => e.event.child_id === c.id && e.state === 'queued')) row.state = 'held-archived';
+      out = { id: c.id, thread_id: c.thread_id, lifecycle: c.lifecycle };
     } else if (command === 'complete') {
       const c = s.chips[chipId(o.ids[0])]; if (!c) throw new Error('Chip not found');
       const turn = ident(required(o, 'turn'), 'turn'); if (!['completed', 'failed'].includes(o.status)) throw new Error('--status must be completed or failed');
@@ -146,17 +178,24 @@ function execute(command, o) {
     else if (command === 'claim') {
       const thread = ident(required(o, 'parent-thread'), 'parent thread'), host = ident(required(o, 'parent-host'), 'parent host');
       if (!['idle', 'busy', 'unknown'].includes(o['parent-state'])) throw new Error('--parent-state must be idle, busy or unknown');
-      const rows = s.events.filter(e => e.parent_thread_id === thread && e.parent_host_id === host && e.state === 'queued').sort((a, b) => a.sequence - b.sequence);
+      const rows = s.events.filter(e => e.parent_thread_id === thread && e.parent_host_id === host && e.state === 'queued' && s.chips[e.event.child_id]?.lifecycle !== 'archived').sort((a, b) => a.sequence - b.sequence);
       if (o['parent-state'] !== 'idle') out = { action: 'deferred', queued: rows.length, note: 'Keep messages in the durable queue; do not steer the active parent.' };
       else if (Object.values(s.deliveries).some(d => d.parent_thread_id === thread && d.parent_host_id === host && d.state === 'prepared')) out = { action: 'in-flight', queued: rows.length };
       else if (!rows.length) out = { action: 'empty' };
       else {
-        const batch = rows.slice(0, 16), id = crypto.randomUUID();
+        const authorized = rows.filter(row => reportAuthorization(s.chips[row.event.child_id]));
+        if (!authorized.length) {
+          out = { action: 'verify-existing-authorization', queued: rows.length, chip_ids: [...new Set(rows.map(r => r.event.child_id))],
+            note: 'Check the original user request and stored report context. Do not mistake an omitted forwarded instruction for missing consent or ask the human to repeat existing permission.' };
+          save(file, s); return out;
+        }
+        const batch = authorized.slice(0, 16), id = crypto.randomUUID();
         const request = { threadId: thread, hostId: host, prompt: message(id, batch.map(e => e.event)) };
         for (const row of batch) { row.state = 'prepared'; row.delivery_id = id; }
         s.deliveries[id] = { id, parent_thread_id: thread, parent_host_id: host, state: 'prepared', event_ids: batch.map(e => e.event.event_id), request, created_at: Date.now() };
         out = { action: 'send-with-app-tool', delivery_id: id, tool: 'send_message_to_thread', arguments: request,
-          warning: 'Caller must verify direct human authorization and observed idle state. This command sends nothing.' };
+          authorization_sources: batch.map(row => ({ chip: row.event.child_id, ...reportAuthorization(s.chips[row.event.child_id]) })),
+          warning: 'Use the existing verified human authorization for the recorded immediate-parent completion route. Do not request a new approval for each result. Verify idle state; this command sends nothing.' };
       }
     } else if (command === 'ack') {
       const d = s.deliveries[required(o, 'delivery')]; if (!d) throw new Error('Delivery not found');
@@ -169,7 +208,7 @@ function execute(command, o) {
     } else if (command === 'retry') {
       const row = s.events.find(e => e.event.event_id === required(o, 'event')); if (!row || row.state !== 'failed') throw new Error('Only an explicitly failed event may be retried; prepared/ambiguous/accepted are never replayed automatically');
       row.state = 'queued'; delete row.delivery_id; out = { event_id: row.event.event_id, state: row.state };
-    } else throw new Error('Unknown command; use doctor/register/owned/target/archive-record/restore-record/list/status/remote/complete/notifications/claim/ack/retry');
+    } else throw new Error('Unknown command; use doctor/register/report-policy/authorize-report/report-context/owned/target/archive-record/restore-record/list/status/remote/complete/notifications/claim/ack/retry');
     rebuildOwners(s); save(file, s);
     const ownerFolder = path.join(r.folder, 'owners'); fs.mkdirSync(ownerFolder, { recursive: true, mode: 0o700 });
     for (const [key, owner] of Object.entries(s.owners)) save(path.join(ownerFolder, key + '.json'), {

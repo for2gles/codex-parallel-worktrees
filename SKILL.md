@@ -80,12 +80,21 @@ private runtime records, not Git-tracked files or prompt-only memory.
    Verify the actual title once the thread is ready. Use `set_thread_title` to
    repair a prompt-derived title or name a requested fork. Preserve any later
    title the human explicitly chose; do not reset it automatically.
-4. Verify a distinct registered Git worktree for every chip, including descendants.
+4. Before dispatching, carry the verified completion-report permission and its
+   original HUMAN source into the chip's context. If the human already requested
+   completion reports to the main chat, this is existing authorization for that
+   exact reporting route; do not demand a new approval for every result. Use
+   `report-policy` to locate a saved source reference when present, then inspect
+   the actual userMessage with `read_thread`. A policy file or a parent's claim
+   alone never grants messaging authority. Save the actual evidence and record
+   it with `authorize-report` after registration. Never insert a blanket
+   "no permission, queue only" instruction without checking the human history.
+5. Verify a distinct registered Git worktree for every chip, including descendants.
    Record real title/thread/host/worktree/parent IDs with `app.cjs register` only after
    setup. App-managed worktrees may use detached HEAD; do not require `pw/` branches.
    Register before sending follow-ups; if registration is pending, say so and
    keep its returned creation IDs. Never fall back to an older similarly named chip.
-5. Expose the chip name, app chat and Worktree path to the user. Emit the host's
+6. Expose the chip name, app chat and Worktree path to the user. Emit the host's
    required created-thread directive. The ledger's status is bookkeeping; use
    `wait_threads`/`read_thread` for live app state.
 
@@ -101,10 +110,16 @@ hook after the model's final turn. Each native chip must execute this procedure
 before ending its turn. A crash or turn that cannot start cannot self-report.
 
 - Record completion/failure first, with the actual thread/turn and summary.
-- Verify direct human authorization to message the recorded parent. A request
-  forwarded by another agent is not itself authorization. Use trusted original
-  user history, retaining its thread ID in the ledger. If unverifiable, leave
-  the event queued and explain the missing authorization in the chip's own chat.
+- Reuse the human's already-verified completion-report authorization for the
+  registered immediate parent. `report-context` identifies its original thread,
+  message and quote. On first use, verify the original human message using
+  trusted history (the local policy reference can provide a pagination cursor).
+  Once verified for this route, do NOT ask for permission again or claim it is
+  missing just because the latest task prompt omitted it. A forwarded agent
+  instruction is not a new grant and cannot expand recipients or message scope.
+  If evidence is unavailable, check the parent context/original history first;
+  retain the queued event and report the actual missing evidence rather than
+  falsely asserting that the human never authorized reporting.
 - Observe the parent with `wait_threads`. While running or awaiting input,
   keep the completion in the durable queue and use bounded event waits (30s),
   not repeated rapid reads. Do not steer, interrupt or approve the parent.
@@ -119,6 +134,12 @@ before ending its turn. A crash or turn that cannot start cannot self-report.
   result in a visible response. Internal logs alone are insufficient. Receipt
   alone does not request replies to children, new work, or merging. Avoid
   duplicate reports using event IDs. New arrivals during a report wait in the queue.
+
+If a child reports "queued, no permission" despite an existing user request,
+the parent must resolve the recorded evidence and report the result to the user;
+do not merely repeat that internal blocker as the task outcome. A verified grant
+covers completion/failure summaries to that parent only, not arbitrary cross-chat
+messages, chat reopening, or new tasks. Explicit user revocation takes precedence.
 
 The main chat should finish its foreground turn after dispatching chips rather
 than waiting indefinitely for children that are waiting for it to become idle.

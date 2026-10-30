@@ -12,12 +12,16 @@ function fixture(t) {
   // validated separately through the official create_worktree tool.
   function tree(name) { const p = path.join(temp, name); git(['worktree', 'add', '--detach', p, 'HEAD']); return fs.realpathSync(p); }
   function run(command, extra = {}) { return execute(command, { repo, ids: [], 'owner-thread': 'main-thread', 'owner-host': 'local', ...extra }); }
-  function register(id, extra = {}) { return run('register', { ids: [id], thread: 'thread-' + id, host: 'local', worktree: tree(id), source: repo,
-    'parent-thread': 'main-thread', 'parent-host': 'local', 'authorization-thread': 'human-origin', ...extra }); }
+  const evidenceFile = path.join(temp, 'human-evidence.json');
+  fs.writeFileSync(evidenceFile, JSON.stringify({ thread: { id: 'human-origin', hostId: 'local' }, turns: [{ id: 'request-turn', items: [{ type: 'userMessage', id: 'human-message', content: [{ type: 'text', text: '작업이 끝나면 등록된 상위 채팅에 결과를 보내 나에게 알려줘.' }] }] }] }));
+  function authorize(c, file = evidenceFile) { return run('authorize-report', { ids: [c.id], 'owner-thread': c.parent_thread_id, 'owner-host': c.parent_host_id,
+    'source-thread': 'human-origin', 'source-host': 'local', 'source-message': 'human-message', 'evidence-file': file }); }
+  function register(id, extra = {}, reportAllowed = true) { const c = run('register', { ids: [id], thread: 'thread-' + id, host: 'local', worktree: tree(id), source: repo,
+    'parent-thread': 'main-thread', 'parent-host': 'local', 'authorization-thread': 'human-origin', ...extra }); if (reportAllowed) authorize(c); return c; }
   function complete(id, turn = 'turn-1', summary = id + ' completed') { const f = path.join(temp, 'summary-' + id + '-' + turn + '.txt'); fs.writeFileSync(f, summary); return run('complete', { ids: [id], turn, status: 'completed', 'summary-file': f }); }
   function claim(state = 'idle') { return run('claim', { 'parent-thread': 'main-thread', 'parent-host': 'local', 'parent-state': state }); }
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
-  return { temp, repo, git, tree, run, register, complete, claim };
+  return { temp, repo, git, tree, run, register, complete, claim, authorize, evidenceFile };
 }
 test('registers a separate detached worktree and preserves app thread identity', t => {
   const h = fixture(t), row = h.register('one');
@@ -125,4 +129,42 @@ test('schema 1 owner relationships migrate without adopting chips into a differe
   assert.equal(h.run('owned', { 'owner-thread': 'new-session' }).chips.length, 0);
   const mine = h.run('owned'); assert.equal(mine.chips[0].thread_id, 'thread-one');
   assert.equal(JSON.parse(fs.readFileSync(file)).schema, 2); assert.equal(JSON.parse(fs.readFileSync(mine.owner_file)).owner.thread_id, 'main-thread');
+});
+test('a missing forwarded grant preserves the queue and requests existing evidence, not a new per-result approval', t => {
+  const h = fixture(t), c = h.register('one', {}, false); h.complete('one');
+  assert.equal(h.claim().action, 'verify-existing-authorization'); assert.equal(h.run('notifications')[0].state, 'queued');
+  h.authorize(c); const prepared = h.claim(); assert.equal(prepared.action, 'send-with-app-tool');
+  assert.equal(prepared.authorization_sources[0].source_message_id, 'human-message');
+  assert.equal(prepared.arguments.threadId, c.parent_thread_id);
+});
+test('an agent/delegation message cannot serve as human completion-report authorization', t => {
+  const h = fixture(t), c = h.register('one', {}, false); const fake = JSON.parse(fs.readFileSync(h.evidenceFile));
+  fake.turns[0].items[0].type = 'agentMessage'; const f = path.join(h.temp, 'agent.json'); fs.writeFileSync(f, JSON.stringify(fake));
+  assert.throws(() => h.authorize(c, f), /original human userMessage/);
+  fake.turns[0].items[0].type = 'userMessage'; fake.thread.id = 'wrong-origin'; fs.writeFileSync(f, JSON.stringify(fake));
+  assert.throws(() => h.authorize(c, f), /Evidence source/);
+});
+test('verified reporting permission stays bound to its original owner route', t => {
+  const h = fixture(t), c = h.register('one'); const context = h.run('report-context', { ids: ['one'] });
+  assert.equal(context.report_authorization.scope, 'assigned-work-completion-to-immediate-parent');
+  assert.equal(context.report_authorization.parent_thread_id, c.parent_thread_id);
+  assert.throws(() => h.run('report-context', { ids: ['one'], 'owner-thread': 'someone-else' }), /different parent/);
+  h.complete('one'); assert.equal(h.run('claim', { 'parent-thread': 'someone-else', 'parent-host': 'local', 'parent-state': 'idle' }).action, 'empty');
+});
+test('a saved reporting-policy pointer alone never authorizes a send', t => {
+  const h = fixture(t), previous = process.env.CODEX_HOME, home = path.join(h.temp, 'codex');
+  fs.mkdirSync(path.join(home, 'parallel-worktrees'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'parallel-worktrees/report-policy.json'), JSON.stringify({ source_thread_id: 'human-origin' }));
+  try {
+    process.env.CODEX_HOME = home; h.register('one', {}, false); h.complete('one');
+    assert.equal(h.run('report-policy').configured, true); assert.equal(h.claim().action, 'verify-existing-authorization');
+  } finally { if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous; }
+});
+test('closing a chip holds its old queued report instead of waking its parent later', t => {
+  const h = fixture(t), c = h.register('one'); h.complete('one');
+  const file = path.join(h.temp, 'closed.json'); fs.writeFileSync(file, JSON.stringify({ threadId: c.thread_id, archived: true }));
+  h.run('archive-record', { ids: ['one'], 'receipt-file': file });
+  assert.equal(h.run('notifications')[0].state, 'held-archived'); assert.equal(h.claim().action, 'empty');
+  fs.writeFileSync(file, JSON.stringify({ threadId: c.thread_id, archived: false })); h.run('restore-record', { ids: ['one'], 'receipt-file': file });
+  assert.equal(h.claim().action, 'empty');
 });
