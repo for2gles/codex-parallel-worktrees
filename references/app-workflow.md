@@ -3,6 +3,37 @@
 `A`는 설치된 `scripts/app.cjs`의 절대 경로, `R`은 대상 Git 저장소입니다.
 스크립트는 기록과 메시지 준비만 담당합니다. 채팅·Worktree·메시지 전송은 실제 Codex 앱 도구를 호출해야 합니다.
 
+## 내 소유 하위칩과 새 생성의 구분
+
+처음부터 현재 세션의 실제 ID·호스트로 자기 소유 목록을 조회합니다. 런타임이 제공한 `CODEX_THREAD_ID`를 사용할 수 있으며,
+호스트 ID는 실제 앱 문맥에서 확인합니다. 현재 세션을 제목 검색이나 전역 목록의 첫 번째 결과로 추정하지 마세요.
+
+```bash
+node "$A" owned --repo "$R" --owner-thread CURRENT_PARENT_THREAD_ID --owner-host ACTUAL_HOST_ID
+```
+
+이 명령은 해당 부모의 **직접 자식만** 반환합니다. 소유 관계는 호스트+부모 세션 ID로 고정하며 이름이 같아도 다른 부모의 칩을 고르지 않습니다.
+정본은 Git common dir의 `parallel-worktrees-app/state.json`, 세션별 목록은 `parallel-worktrees-app/owners/<owner-hash>.json`입니다.
+정확한 경로는 `owned`의 `registry_file`·`owner_file`에 나오므로 해시를 외울 필요가 없습니다. 목록이 비어 있어도 소유자 파일을 생성합니다.
+소유자 파일은 정본에서 갱신되는 조회용 기록이며 변경은 스크립트로 처리합니다. 기존 schema 1의 부모 정보는 소유자별 색인으로 이행됩니다.
+이름만 보고 과거 CLI 하위칩을 가져오거나 소유자를 바꾸지 않습니다.
+
+- `하위칩 생성하고 hi라고 보내줘`: 새 채팅·새 Worktree를 생성하고 초기 프롬프트에 hi를 넣습니다.
+- `내 api 칩에 hi라고 보내줘`: 내 목록에서 api를 고르고 실제 앱 상태를 확인합니다.
+- `하위칩에 hi라고 보내줘`: hi는 메시지 본문입니다. 현재 대화에서 새 생성으로 합의했다면 새로 생성하고,
+  기존 대상이 불명확하면 확인합니다. 전역/보관 목록에서 이름이 hi인 채팅을 골라 보내지 않습니다.
+
+기존 대상에 보내기 전 다음 검증을 사용합니다. `--thread-state`는 실제 앱 조회 결과여야 합니다.
+
+```bash
+node "$A" target api --repo "$R" --owner-thread CURRENT_PARENT_THREAD_ID \
+  --owner-host ACTUAL_HOST_ID --thread-state active --message-file /absolute/message.txt
+```
+
+소유자가 다르면 거부하고, archived/unknown이면 메시지 요청을 만들지 않습니다. active는 보관되지 않았다는 뜻이며 모델이 idle이라는 뜻은 아닙니다.
+실제 전송은 직접적인 사용자 허가 아래 네이티브 도구로 합니다. 보관 상태 때문에 거부되면 자동 보관 해제·restore·resume을 하지 마세요.
+보관 해제는 사용자가 그 채팅을 명시적으로 다시 열라고 요청한 경우에만 앱에서 처리하며, 소유 관계 변경과는 별개입니다.
+
 ## 네이티브 생성
 
 `list_projects`에서 요청한 Git 프로젝트를 찾았으면 다음 형태로 실제 도구를 호출합니다.
@@ -32,7 +63,7 @@
 ```bash
 node "$A" doctor --repo "$R"
 node "$A" register api --repo "$R" \
-  --thread ACTUAL_THREAD_ID --host ACTUAL_HOST_ID \
+  --thread ACTUAL_THREAD_ID --host ACTUAL_HOST_ID --title '하위칩 · 로그인 API' \
   --source /absolute/source --worktree /actual/app/worktree \
   --parent-thread ACTUAL_PARENT_THREAD_ID --parent-host ACTUAL_PARENT_HOST_ID \
   --authorization-thread ACTUAL_HUMAN_REQUEST_THREAD_ID
@@ -40,7 +71,7 @@ node "$A" register api-db --repo "$R" \
   --thread ACTUAL_CHILD_THREAD_ID --host ACTUAL_HOST_ID \
   --source /actual/app/worktree --worktree /actual/child/worktree \
   --parent api --authorization-thread ACTUAL_HUMAN_REQUEST_THREAD_ID
-node "$A" list --repo "$R"
+node "$A" list --repo "$R" --owner-thread CURRENT_PARENT_THREAD_ID --owner-host ACTUAL_HOST_ID
 ```
 
 ID·소스·부모·허가 근거를 임의로 채우지 마세요. `register`는 Git 구조와 중복을 검사하지만, 앱이 생성한 사실이나
@@ -54,7 +85,7 @@ ID·소스·부모·허가 근거를 임의로 채우지 마세요. `register`�
 ```bash
 node "$A" complete api --repo "$R" --turn ACTUAL_TURN_ID \
   --status completed --summary-file /absolute/result.txt
-node "$A" notifications --repo "$R"
+node "$A" notifications --repo "$R" --owner-thread CURRENT_PARENT_THREAD_ID --owner-host ACTUAL_HOST_ID
 node "$A" claim --repo "$R" --parent-thread ACTUAL_PARENT_THREAD_ID \
   --parent-host ACTUAL_PARENT_HOST_ID --parent-state busy
 ```
@@ -104,7 +135,17 @@ idle 상태가 될 수 있어야 합니다. 메인이 자식을 기다리고 자
 앱에서 생성한 Worktree는 앱의 archive/restore 도구로 관리합니다. 다른 채팅 소유의 Worktree는 임의로 연결·삭제하지 않습니다.
 병합이 요청되면 별도 브랜치가 없는 detached HEAD 커밋도 검토한 뒤 직접 부모에 통합할 수 있습니다.
 앱 정책에 따른 자동 정리나 소유권 제한을 우회하지 마세요.
+허가된 보관 처리가 성공하면 실제 도구 receipt를 파일로 저장하고 로컬 목록에도 반영합니다.
 
-런타임 기록은 Git common dir의 `parallel-worktrees-app/state.json`에 보관합니다. 이전 CLI 기록과 분리하며
+```bash
+node "$A" archive-record api --repo "$R" --owner-thread CURRENT_PARENT_THREAD_ID \
+  --owner-host ACTUAL_HOST_ID --receipt-file /absolute/archive-receipt.json
+```
+
+receipt는 정확한 threadId와 archived=true를 확인한 앱 응답이어야 합니다. 보관 뒤에도 소유 이력은 유지하고 기본 목록에서는 제외합니다.
+사용자가 해당 채팅의 재개를 직접 요청해 앱에서 보관 해제에 성공한 경우에만, archived=false인 정확한 receipt로
+`restore-record`를 호출해 조회 기록을 갱신할 수 있습니다. 이 명령은 앱의 보관을 해제하지 않으며 자동 복구 절차로 사용하지 않습니다.
+
+런타임 기록과 소유자별 목록은 Git common dir의 `parallel-worktrees-app/`에 보관합니다. 이전 CLI 기록과 분리하며
 기존 세션·Worktree·소켓을 옮기거나 종료하지 않습니다. 실행 중인 구버전 칩은 해당 버전의 절차로 별도 정리합니다.
 이 폴더의 요약·경로·대화 ID·도구 receipt는 공개하거나 커밋하지 않습니다.

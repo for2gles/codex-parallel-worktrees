@@ -15,6 +15,38 @@ completion delivery, native-tool examples and limitations. Local bookkeeping
 uses Node.js 18+ and Git; no npm install or Python runtime is needed.
 Resolve `scripts/app.cjs` from this skill's actual directory.
 
+## Resolve intent and ownership before selecting a chat
+
+1. Identify the current parent by its exact runtime thread ID and app host ID.
+   `CODEX_THREAD_ID`, when supplied by the runtime, is the current thread ID;
+   verify the host from app context. Never guess identity from a title or the
+   first active chat. Run `app.cjs owned --repo REPO --owner-thread ID --owner-host HOST`.
+2. Ownership is the exact `(host, parent thread)` pair in the persistent ledger,
+   not the chip title, message body or a globally recent conversation. Another
+   parent's chip, an unregistered legacy chip or a grandchild is not your direct
+   child. Never silently adopt it or use it to avoid creating a requested chip.
+3. For a human request to CREATE a chip, create a FRESH app chat and worktree.
+   Put the requested message (for example `hi`) in its initial prompt. Do not
+   search history for a similarly named existing or archived chat first.
+4. For a message to an EXISTING chip, resolve only an exact owned chip ID or a
+   human-identified owned target. Before the native send, use `app.cjs target`
+   with your owner IDs and freshly inspected app state. The message text `hi`
+   never identifies a target named `hi`. Do not select from global history.
+5. If the target is unspecified, use the human's established creation/continuation
+   intent in the current trusted conversation. If no owned target exists and
+   fresh creation is authorized, create one. Otherwise ask which target/new chat
+   is intended. Do not invent creation authority or pick someone else's old chat.
+6. Archived targets are excluded by default. Never automatically unarchive,
+   restore or resume one after a failed send. Reopening requires a direct human
+   request to reopen that exact conversation. On archive/ownership rejection,
+   stop and explain; do not retry by changing ownership or archive state.
+
+The canonical file is in the Git common dir at `parallel-worktrees-app/state.json`.
+Per-owner views are persisted under `parallel-worktrees-app/owners/`; `owned`
+returns the exact file path, including an empty list for a new owner. These files
+survive chat turns and are shared by worktrees of the same repository. They are
+private runtime records, not Git-tracked files or prompt-only memory.
+
 ## Before creating a chip
 
 - Require the Codex app's chat/worktree tools. If absent, explain that app mode
@@ -49,8 +81,10 @@ Resolve `scripts/app.cjs` from this skill's actual directory.
    repair a prompt-derived title or name a requested fork. Preserve any later
    title the human explicitly chose; do not reset it automatically.
 4. Verify a distinct registered Git worktree for every chip, including descendants.
-   Record real thread/host/worktree/parent IDs with `app.cjs register` only after
+   Record real title/thread/host/worktree/parent IDs with `app.cjs register` only after
    setup. App-managed worktrees may use detached HEAD; do not require `pw/` branches.
+   Register before sending follow-ups; if registration is pending, say so and
+   keep its returned creation IDs. Never fall back to an older similarly named chip.
 5. Expose the chip name, app chat and Worktree path to the user. Emit the host's
    required created-thread directive. The ledger's status is bookkeeping; use
    `wait_threads`/`read_thread` for live app state.
@@ -102,7 +136,9 @@ turn does not certify implementation, tests or merge success.
 
 Use the app's archive/restore lifecycle for app-managed worktrees. Do not remove
 them using old helpers, force Git commands or direct filesystem deletion. Keep
-runtime records private and out of commits.
+runtime records private and out of commits. After an authorized app archive,
+record its exact successful tool receipt with `archive-record` so the owned list
+excludes it. Ownership remains recorded for audit; archiving never transfers it.
 
 ## Verification boundary
 

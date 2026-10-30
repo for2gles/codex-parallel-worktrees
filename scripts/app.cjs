@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const cp = require('node:child_process');
-const VERSION = '0.5.0-app.2';
+const VERSION = '0.5.0-app.3';
 const MAX_SUMMARY = 6000;
 function git(repo, args) {
   const r = cp.spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8', maxBuffer: 8e6 });
@@ -28,9 +28,27 @@ function ident(s, what = 'ID') {
 function chipId(s) { if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(s || '')) throw new Error('Invalid chip ID'); return s; }
 function required(o, key) { if (!o[key]) throw new Error('--' + key + ' is required'); return o[key]; }
 function eventId(thread, turn) { return crypto.createHash('sha256').update(thread + '\0' + turn).digest('hex'); }
+function ownerScope(o) { return { thread_id: ident(required(o, 'owner-thread'), 'owner thread'), host_id: ident(required(o, 'owner-host'), 'owner host') }; }
+function ownerKey(owner) { return crypto.createHash('sha256').update(JSON.stringify([owner.host_id, owner.thread_id])).digest('hex'); }
+function belongsTo(c, owner) { return c.parent_thread_id === owner.thread_id && c.parent_host_id === owner.host_id; }
+function ownedChip(s, o) {
+  const c = s.chips[chipId(o.ids[0])]; if (!c) throw new Error('Chip not found in this repository');
+  if (!belongsTo(c, ownerScope(o))) throw new Error('This chip belongs to a different parent session; do not send, adopt or unarchive it');
+  return c;
+}
+function rebuildOwners(s) {
+  const known = Object.values(s.owners || {});
+  s.schema = 2; s.owners = {};
+  for (const owner of known) if (owner.thread_id && owner.host_id) s.owners[ownerKey(owner)] = { thread_id: owner.thread_id, host_id: owner.host_id, chip_ids: [] };
+  for (const c of Object.values(s.chips)) {
+    const owner = { thread_id: c.parent_thread_id, host_id: c.parent_host_id }, key = ownerKey(owner);
+    if (!s.owners[key]) s.owners[key] = { ...owner, chip_ids: [] };
+    s.owners[key].chip_ids.push(c.id);
+  }
+}
 function parse(argv) {
   const command = argv.shift(), o = { repo: '.', ids: [] };
-  const values = new Set(['repo', 'thread', 'host', 'worktree', 'source', 'parent', 'parent-thread', 'parent-host', 'authorization-thread', 'turn', 'status', 'summary-file', 'parent-state', 'delivery', 'receipt-file', 'event']);
+  const values = new Set(['repo', 'thread', 'host', 'worktree', 'source', 'parent', 'parent-thread', 'parent-host', 'authorization-thread', 'turn', 'status', 'summary-file', 'parent-state', 'delivery', 'receipt-file', 'event', 'owner-thread', 'owner-host', 'thread-state', 'message-file', 'title']);
   while (argv.length) {
     const a = argv.shift();
     if (!a.startsWith('--')) { o.ids.push(a); continue; }
@@ -56,6 +74,7 @@ function execute(command, o) {
   try {
     const file = path.join(r.folder, 'state.json');
     const s = fs.existsSync(file) ? read(file) : { schema: 1, mode: 'app-native', sequence: 0, chips: {}, events: [], deliveries: {} };
+    rebuildOwners(s);
     let out;
     if (command === 'doctor') out = { version: VERSION, mode: 'app-native-only', node: process.versions.node, registry: r.folder, model_turn_started: false,
       required_app_tools: ['create_thread', 'create_worktree', 'read_thread', 'wait_threads', 'send_message_to_thread'],
@@ -75,14 +94,43 @@ function execute(command, o) {
       const parentThread = ident(parent?.thread_id || required(o, 'parent-thread'), 'parent thread');
       const parentHost = ident(parent?.host_id || required(o, 'parent-host'), 'parent host');
       if (parentThread === thread && parentHost === host) throw new Error('A chip cannot be its own parent');
-      out = s.chips[id] = { id, mode: 'app-native', thread_id: thread, host_id: host, worktree, source,
+      out = s.chips[id] = { id, mode: 'app-native', thread_id: thread, host_id: host, worktree, source, title: o.title || null, lifecycle: 'active',
         parent_id: parent?.id || null, parent_thread_id: parentThread, parent_host_id: parentHost,
         authorization_thread_id: ident(required(o, 'authorization-thread'), 'authorization thread'),
         created_at: Date.now(), live_status: 'unknown', remote: null };
+    } else if (command === 'owned') {
+      const owner = ownerScope(o), all = Object.values(s.chips).filter(c => belongsTo(c, owner));
+      if (!s.owners[ownerKey(owner)]) s.owners[ownerKey(owner)] = { ...owner, chip_ids: [] };
+      out = { owner, registry_file: file, owner_file: path.join(r.folder, 'owners', ownerKey(owner) + '.json'),
+        chips: all.filter(c => c.lifecycle !== 'archived'), archived_count: all.filter(c => c.lifecycle === 'archived').length };
     } else if (['status', 'list', 'remote'].includes(command)) {
-      const chips = o.ids.length ? o.ids.map(id => { const c = s.chips[chipId(id)]; if (!c) throw new Error('Chip not found'); return c; }) : Object.values(s.chips);
+      const owner = ownerScope(o);
+      const chips = o.ids.length ? o.ids.map(id => ownedChip(s, { ...o, ids: [id] })) : Object.values(s.chips).filter(c => belongsTo(c, owner) && c.lifecycle !== 'archived');
       out = command === 'remote' ? chips.map(c => ({ chip: c.id, thread_id: c.thread_id, host_id: c.host_id, worktree: c.worktree,
         terminal_command: null, note: 'Native app endpoint has not been exposed/verified. Open this exact thread in Codex. Do not start a competing local resume/server.' })) : chips;
+    } else if (command === 'target') {
+      const c = ownedChip(s, o);
+      if (!['active', 'archived', 'unknown'].includes(o['thread-state'])) throw new Error('--thread-state must come from live app inspection: active, archived or unknown');
+      if (c.lifecycle === 'archived' || o['thread-state'] !== 'active') {
+        if (o['thread-state'] === 'archived') { c.lifecycle = 'archived'; c.archived_at = Date.now(); }
+        out = { action: 'blocked', reason: c.lifecycle === 'archived' ? 'archived' : 'live-state-unknown', thread_id: c.thread_id,
+          note: 'Do not unarchive automatically. No message request was prepared.' };
+      } else {
+        const request = { threadId: c.thread_id, hostId: c.host_id };
+        if (o['message-file']) {
+          request.prompt = fs.readFileSync(o['message-file'], 'utf8');
+          if (!request.prompt.trim() || request.prompt.length > 65536) throw new Error('Message must contain 1-65536 characters');
+        }
+        out = { action: 'owned-target', chip: c.id, title: c.title, owner: ownerScope(o), thread_id: c.thread_id, host_id: c.host_id,
+          ...(request.prompt ? { tool: 'send_message_to_thread', arguments: request } : {}),
+          note: 'Ownership and observed non-archived state checked. Direct human messaging authorization still required; this command sends nothing.' };
+      }
+    } else if (['archive-record', 'restore-record'].includes(command)) {
+      const c = ownedChip(s, o), receipt = read(required(o, 'receipt-file'));
+      const result = receipt.content ? JSON.parse(receipt.content.find(b => b.type === 'text')?.text || '{}') : receipt;
+      const archived = command === 'archive-record';
+      if (result.threadId !== c.thread_id || result.archived !== archived || receipt.isError) throw new Error('Receipt does not confirm the requested archive state of this exact chip');
+      c.lifecycle = archived ? 'archived' : 'active'; c.lifecycle_updated_at = Date.now(); out = { id: c.id, thread_id: c.thread_id, lifecycle: c.lifecycle };
     } else if (command === 'complete') {
       const c = s.chips[chipId(o.ids[0])]; if (!c) throw new Error('Chip not found');
       const turn = ident(required(o, 'turn'), 'turn'); if (!['completed', 'failed'].includes(o.status)) throw new Error('--status must be completed or failed');
@@ -94,7 +142,7 @@ function execute(command, o) {
           event: { event_id: id, child_id: c.id, child_thread_id: c.thread_id, child_turn_id: turn, status: o.status, worktree: c.worktree, summary, created_at: Date.now() } };
         s.events.push(row); out = { duplicate: false, ...row };
       }
-    } else if (command === 'notifications') out = s.events;
+    } else if (command === 'notifications') { const owner = ownerScope(o); out = s.events.filter(e => e.parent_thread_id === owner.thread_id && e.parent_host_id === owner.host_id); }
     else if (command === 'claim') {
       const thread = ident(required(o, 'parent-thread'), 'parent thread'), host = ident(required(o, 'parent-host'), 'parent host');
       if (!['idle', 'busy', 'unknown'].includes(o['parent-state'])) throw new Error('--parent-state must be idle, busy or unknown');
@@ -121,8 +169,14 @@ function execute(command, o) {
     } else if (command === 'retry') {
       const row = s.events.find(e => e.event.event_id === required(o, 'event')); if (!row || row.state !== 'failed') throw new Error('Only an explicitly failed event may be retried; prepared/ambiguous/accepted are never replayed automatically');
       row.state = 'queued'; delete row.delivery_id; out = { event_id: row.event.event_id, state: row.state };
-    } else throw new Error('Unknown command; use doctor/register/list/status/remote/complete/notifications/claim/ack/retry');
-    save(file, s); return out;
+    } else throw new Error('Unknown command; use doctor/register/owned/target/archive-record/restore-record/list/status/remote/complete/notifications/claim/ack/retry');
+    rebuildOwners(s); save(file, s);
+    const ownerFolder = path.join(r.folder, 'owners'); fs.mkdirSync(ownerFolder, { recursive: true, mode: 0o700 });
+    for (const [key, owner] of Object.entries(s.owners)) save(path.join(ownerFolder, key + '.json'), {
+      schema: 1, owner: { thread_id: owner.thread_id, host_id: owner.host_id },
+      chips: owner.chip_ids.map(id => s.chips[id]), registry_file: file,
+      note: 'Derived ownership view. The central registry is authoritative; refresh live app state before messaging.' });
+    return out;
   } finally { fs.rmdirSync(lock); }
 }
 function main(argv = process.argv.slice(2)) {

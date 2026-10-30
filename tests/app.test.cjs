@@ -11,7 +11,7 @@ function fixture(t) {
   // Git fixtures only test structural isolation. Actual app-managed creation is
   // validated separately through the official create_worktree tool.
   function tree(name) { const p = path.join(temp, name); git(['worktree', 'add', '--detach', p, 'HEAD']); return fs.realpathSync(p); }
-  function run(command, extra = {}) { return execute(command, { repo, ids: [], ...extra }); }
+  function run(command, extra = {}) { return execute(command, { repo, ids: [], 'owner-thread': 'main-thread', 'owner-host': 'local', ...extra }); }
   function register(id, extra = {}) { return run('register', { ids: [id], thread: 'thread-' + id, host: 'local', worktree: tree(id), source: repo,
     'parent-thread': 'main-thread', 'parent-host': 'local', 'authorization-thread': 'human-origin', ...extra }); }
   function complete(id, turn = 'turn-1', summary = id + ' completed') { const f = path.join(temp, 'summary-' + id + '-' + turn + '.txt'); fs.writeFileSync(f, summary); return run('complete', { ids: [id], turn, status: 'completed', 'summary-file': f }); }
@@ -71,4 +71,58 @@ test('failed delivery retries are explicit and stale locks are preserved', t => 
 });
 test('old independent CLI entrypoints fail closed', t => {
   const h = fixture(t); for (const cmd of ['start', 'message', 'merge', 'cleanup', 'stop', 'attach', 'bind-parent']) assert.throws(() => h.run(cmd), /App-only skill/);
+});
+test('a parent sees only its own direct chips even when another parent uses the same title', t => {
+  const h = fixture(t); h.register('my-hi', { title: '하위칩 · hi' });
+  h.register('other-hi', { title: '하위칩 · hi', 'parent-thread': 'other-parent' });
+  const mine = h.run('owned'); assert.deepEqual(mine.chips.map(c => c.id), ['my-hi']);
+  const view = JSON.parse(fs.readFileSync(mine.owner_file)); assert.equal(view.owner.thread_id, 'main-thread'); assert.deepEqual(view.chips.map(c => c.id), ['my-hi']);
+  assert.deepEqual(h.run('list').map(c => c.id), ['my-hi']);
+  assert.throws(() => h.run('target', { ids: ['other-hi'], 'thread-state': 'active' }), /different parent/);
+  assert.throws(() => h.run('list', { 'owner-thread': undefined }), /owner-thread/);
+});
+test('ownership includes the host; a parent cannot target its grandchild directly', t => {
+  const h = fixture(t), parent = h.register('parent');
+  h.register('child', { parent: parent.id, source: parent.worktree, 'parent-thread': parent.thread_id });
+  assert.deepEqual(h.run('owned').chips.map(c => c.id), ['parent']);
+  assert.equal(h.run('owned', { 'owner-host': 'other-host' }).chips.length, 0);
+  const empty = h.run('owned', { 'owner-host': 'other-host' }); assert.equal(JSON.parse(fs.readFileSync(empty.owner_file)).chips.length, 0);
+  assert.throws(() => h.run('target', { ids: ['child'], 'thread-state': 'active' }), /different parent/);
+  assert.equal(h.run('target', { ids: ['child'], 'owner-thread': parent.thread_id, 'thread-state': 'active' }).thread_id, 'thread-child');
+});
+test('an archived chip cannot be automatically reopened or used as a message target', t => {
+  const h = fixture(t), c = h.register('one');
+  const receipt = path.join(h.temp, 'archive.json'); fs.writeFileSync(receipt, JSON.stringify({ threadId: c.thread_id, archived: true }));
+  h.run('archive-record', { ids: ['one'], 'receipt-file': receipt });
+  assert.equal(h.run('owned').chips.length, 0); assert.equal(h.run('owned').archived_count, 1);
+  const blocked = h.run('target', { ids: ['one'], 'thread-state': 'active' }); assert.equal(blocked.action, 'blocked'); assert.equal(blocked.reason, 'archived'); assert.equal(blocked.arguments, undefined);
+});
+test('fresh app inspection can mark an archived target and unknown state never prepares a send', t => {
+  const h = fixture(t); h.register('one');
+  assert.equal(h.run('target', { ids: ['one'], 'thread-state': 'unknown' }).action, 'blocked');
+  assert.equal(h.run('target', { ids: ['one'], 'thread-state': 'archived' }).reason, 'archived');
+  assert.equal(h.run('owned').archived_count, 1);
+});
+test('message content never selects a target and completion views are owner-scoped', t => {
+  const h = fixture(t), mine = h.register('mine'); h.register('hi', { 'parent-thread': 'other-parent' });
+  const f = path.join(h.temp, 'message.txt'); fs.writeFileSync(f, 'hi');
+  const target = h.run('target', { ids: ['mine'], 'thread-state': 'active', 'message-file': f });
+  assert.equal(target.arguments.threadId, mine.thread_id); assert.equal(target.arguments.prompt, 'hi');
+  h.complete('mine'); h.complete('hi'); assert.deepEqual(h.run('notifications').map(r => r.event.child_id), ['mine']);
+});
+test('restore bookkeeping requires an exact successful app receipt and preserves ownership', t => {
+  const h = fixture(t), c = h.register('one'); const f = path.join(h.temp, 'receipt.json');
+  fs.writeFileSync(f, JSON.stringify({ threadId: c.thread_id, archived: true })); h.run('archive-record', { ids: ['one'], 'receipt-file': f });
+  assert.throws(() => h.run('restore-record', { ids: ['one'], 'receipt-file': f }), /Receipt/);
+  fs.writeFileSync(f, JSON.stringify({ threadId: 'another-thread', archived: false })); assert.throws(() => h.run('restore-record', { ids: ['one'], 'receipt-file': f }), /Receipt/);
+  fs.writeFileSync(f, JSON.stringify({ threadId: c.thread_id, archived: false })); h.run('restore-record', { ids: ['one'], 'receipt-file': f });
+  assert.equal(h.run('owned').chips[0].parent_thread_id, 'main-thread');
+  assert.equal(h.run('target', { ids: ['one'], 'thread-state': 'active' }).action, 'owned-target');
+});
+test('schema 1 owner relationships migrate without adopting chips into a different session', t => {
+  const h = fixture(t); h.register('one'); const file = path.join(registry(h.repo).folder, 'state.json');
+  const old = JSON.parse(fs.readFileSync(file)); old.schema = 1; delete old.owners; fs.writeFileSync(file, JSON.stringify(old));
+  assert.equal(h.run('owned', { 'owner-thread': 'new-session' }).chips.length, 0);
+  const mine = h.run('owned'); assert.equal(mine.chips[0].thread_id, 'thread-one');
+  assert.equal(JSON.parse(fs.readFileSync(file)).schema, 2); assert.equal(JSON.parse(fs.readFileSync(mine.owner_file)).owner.thread_id, 'main-thread');
 });
