@@ -14,8 +14,10 @@ function fixture(t) {
   function run(command, extra = {}) { return execute(command, { repo, ids: [], 'owner-thread': 'main-thread', 'owner-host': 'local', ...extra }); }
   const evidenceFile = path.join(temp, 'human-evidence.json');
   fs.writeFileSync(evidenceFile, JSON.stringify({ thread: { id: 'human-origin', hostId: 'local' }, turns: [{ id: 'request-turn', items: [{ type: 'userMessage', id: 'human-message', content: [{ type: 'text', text: '작업이 끝나면 등록된 상위 채팅에 결과를 보내 나에게 알려줘.' }] }] }] }));
-  function authorize(c, file = evidenceFile) { return run('authorize-report', { ids: [c.id], 'owner-thread': c.parent_thread_id, 'owner-host': c.parent_host_id,
-    'source-thread': 'human-origin', 'source-host': 'local', 'source-message': 'human-message', 'evidence-file': file }); }
+  function authorize(c, file) {
+    if (!file) { const e = JSON.parse(fs.readFileSync(evidenceFile)); e.thread.id = c.parent_thread_id; e.thread.hostId = c.parent_host_id; file = path.join(temp, 'evidence-' + c.id + '.json'); fs.writeFileSync(file, JSON.stringify(e)); }
+    return run('authorize-report', { ids: [c.id], 'owner-thread': c.parent_thread_id, 'owner-host': c.parent_host_id,
+      'source-thread': c.parent_thread_id, 'source-host': c.parent_host_id, 'source-message': 'human-message', 'evidence-file': file }); }
   function register(id, extra = {}, reportAllowed = true) { const c = run('register', { ids: [id], thread: 'thread-' + id, host: 'local', worktree: tree(id), source: repo,
     'parent-thread': 'main-thread', 'parent-host': 'local', 'authorization-thread': 'human-origin', ...extra }); if (reportAllowed) authorize(c); return c; }
   function complete(id, turn = 'turn-1', summary = id + ' completed') { const f = path.join(temp, 'summary-' + id + '-' + turn + '.txt'); fs.writeFileSync(f, summary); return run('complete', { ids: [id], turn, status: 'completed', 'summary-file': f }); }
@@ -139,6 +141,7 @@ test('a missing forwarded grant preserves the queue and requests existing eviden
 });
 test('an agent/delegation message cannot serve as human completion-report authorization', t => {
   const h = fixture(t), c = h.register('one', {}, false); const fake = JSON.parse(fs.readFileSync(h.evidenceFile));
+  fake.thread.id = c.parent_thread_id;
   fake.turns[0].items[0].type = 'agentMessage'; const f = path.join(h.temp, 'agent.json'); fs.writeFileSync(f, JSON.stringify(fake));
   assert.throws(() => h.authorize(c, f), /original human userMessage/);
   fake.turns[0].items[0].type = 'userMessage'; fake.thread.id = 'wrong-origin'; fs.writeFileSync(f, JSON.stringify(fake));
@@ -166,5 +169,28 @@ test('closing a chip holds its old queued report instead of waking its parent la
   h.run('archive-record', { ids: ['one'], 'receipt-file': file });
   assert.equal(h.run('notifications')[0].state, 'held-archived'); assert.equal(h.claim().action, 'empty');
   fs.writeFileSync(file, JSON.stringify({ threadId: c.thread_id, archived: false })); h.run('restore-record', { ids: ['one'], 'receipt-file': file });
+  assert.equal(h.claim().action, 'empty');
+});
+test('a global workflow preference cannot authorize a different recipient implicitly', t => {
+  const h = fixture(t); h.register('one', {}, false);
+  assert.throws(() => h.run('authorize-report', { ids: ['one'], 'source-thread': 'human-origin', 'source-host': 'local', 'source-message': 'human-message', 'evidence-file': h.evidenceFile }), /general workflow request/);
+  h.complete('one'); assert.equal(h.claim().action, 'verify-existing-authorization');
+});
+test('automatic review rejection is a durable hold, not a transient failure to retry', t => {
+  const h = fixture(t); h.register('one'); const event = h.complete('one'), d = h.claim();
+  const f = path.join(h.temp, 'rejected.json'); fs.writeFileSync(f, JSON.stringify({ isError: true, content: [{ type: 'text', text: 'This action was rejected due to unacceptable risk. Do not bypass this rejection.' }] }));
+  assert.equal(h.run('ack', { delivery: d.delivery_id, status: 'failed', 'receipt-file': f }).state, 'review-rejected');
+  assert.throws(() => h.run('retry', { event: event.event.event_id }), /review-rejected/);
+  assert.equal(h.claim().action, 'empty');
+});
+test('an existing failed delivery with a review rejection receipt migrates to a hold', t => {
+  const h = fixture(t); h.register('one'); const event = h.complete('one'), d = h.claim();
+  const file = path.join(registry(h.repo).folder, 'state.json'), state = JSON.parse(fs.readFileSync(file));
+  state.deliveries[d.delivery_id].state = 'failed';
+  state.deliveries[d.delivery_id].receipt = JSON.stringify({ isError: true, content: [{ type: 'text', text: 'This action was rejected due to unacceptable risk.' }] });
+  state.events[0].state = 'failed'; fs.writeFileSync(file, JSON.stringify(state));
+  assert.equal(h.run('notifications')[0].state, 'review-rejected');
+  assert.equal(JSON.parse(fs.readFileSync(file)).deliveries[d.delivery_id].state, 'review-rejected');
+  assert.throws(() => h.run('retry', { event: event.event.event_id }), /review-rejected/);
   assert.equal(h.claim().action, 'empty');
 });

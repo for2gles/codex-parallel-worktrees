@@ -5,7 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const cp = require('node:child_process');
 const os = require('node:os');
-const VERSION = '0.5.0-app.5';
+const VERSION = '0.5.0-app.6';
 const MAX_SUMMARY = 6000;
 function git(repo, args) {
   const r = cp.spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8', maxBuffer: 8e6 });
@@ -32,9 +32,19 @@ function eventId(thread, turn) { return crypto.createHash('sha256').update(threa
 function ownerScope(o) { return { thread_id: ident(required(o, 'owner-thread'), 'owner thread'), host_id: ident(required(o, 'owner-host'), 'owner host') }; }
 function ownerKey(owner) { return crypto.createHash('sha256').update(JSON.stringify([owner.host_id, owner.thread_id])).digest('hex'); }
 function belongsTo(c, owner) { return c.parent_thread_id === owner.thread_id && c.parent_host_id === owner.host_id; }
+function routeSpecificEvidence(c, a) {
+  return a.source_thread_id === c.parent_thread_id && a.source_host_id === c.parent_host_id
+    || a.source_thread_id === c.thread_id && a.source_host_id === c.host_id
+    || a.source_host_id === c.parent_host_id && a.quote?.includes(c.parent_thread_id);
+}
 function reportAuthorization(c) {
   const a = c?.report_authorization;
-  return a?.scope === 'assigned-work-completion-to-immediate-parent' && a.parent_thread_id === c.parent_thread_id && a.parent_host_id === c.parent_host_id ? a : null;
+  return a?.scope === 'assigned-work-completion-to-immediate-parent' && a.parent_thread_id === c.parent_thread_id && a.parent_host_id === c.parent_host_id && routeSpecificEvidence(c, a) ? a : null;
+}
+function reviewDenied(receipt) {
+  try { const r = typeof receipt === 'string' ? JSON.parse(receipt) : receipt;
+    return r?.isError === true && r.content?.some(b => b.type === 'text' && /This action was rejected due to unacceptable risk|Do not bypass this rejection/.test(b.text));
+  } catch { return false; }
 }
 function ownedChip(s, o) {
   const c = s.chips[chipId(o.ids[0])]; if (!c) throw new Error('Chip not found in this repository');
@@ -79,6 +89,10 @@ function execute(command, o) {
   try {
     const file = path.join(r.folder, 'state.json');
     const s = fs.existsSync(file) ? read(file) : { schema: 1, mode: 'app-native', sequence: 0, chips: {}, events: [], deliveries: {} };
+    for (const d of Object.values(s.deliveries)) if (d.state === 'failed' && reviewDenied(d.receipt)) {
+      d.state = 'review-rejected';
+      for (const row of s.events.filter(e => e.delivery_id === d.id)) row.state = 'review-rejected';
+    }
     rebuildOwners(s);
     let out;
     if (command === 'report-policy') {
@@ -122,6 +136,7 @@ function execute(command, o) {
         parent_thread_id: c.parent_thread_id, parent_host_id: c.parent_host_id,
         source_thread_id: thread, source_host_id: host, source_turn_id: found.turn.id, source_message_id: message,
         quote, evidence_sha256: crypto.createHash('sha256').update(JSON.stringify(found.item)).digest('hex'), recorded_at: Date.now() };
+      if (!routeSpecificEvidence(c, c.report_authorization)) throw new Error('A general workflow request in another conversation is not sufficient for this new recipient. Verify explicit reporting permission in the parent/child conversation, or a human request naming this exact parent thread.');
       out = { chip: c.id, report_authorization: c.report_authorization,
         note: 'Records caller-verified human authorization for this exact completion route. The file/digest is not a signature or a new grant; verify meaning using trusted user history.' };
     } else if (command === 'report-context') {
@@ -202,11 +217,11 @@ function execute(command, o) {
       if (d.state !== 'prepared') throw new Error('Delivery was already acknowledged');
       if (!['accepted', 'failed', 'ambiguous'].includes(o.status)) throw new Error('Invalid delivery acknowledgement');
       const receipt = fs.readFileSync(required(o, 'receipt-file'), 'utf8'); if (!receipt.trim() || receipt.length > 65536) throw new Error('Receipt must contain 1-65536 characters');
-      d.state = o.status; d.receipt = receipt; d.updated_at = Date.now();
-      for (const row of s.events.filter(e => e.delivery_id === d.id)) row.state = o.status;
+      d.state = reviewDenied(receipt) ? 'review-rejected' : o.status; d.receipt = receipt; d.updated_at = Date.now();
+      for (const row of s.events.filter(e => e.delivery_id === d.id)) row.state = d.state;
       out = { delivery_id: d.id, state: d.state, user_report_confirmed: false };
     } else if (command === 'retry') {
-      const row = s.events.find(e => e.event.event_id === required(o, 'event')); if (!row || row.state !== 'failed') throw new Error('Only an explicitly failed event may be retried; prepared/ambiguous/accepted are never replayed automatically');
+      const row = s.events.find(e => e.event.event_id === required(o, 'event')); if (!row || row.state !== 'failed') throw new Error('Only an explicitly failed event may be retried; review-rejected/prepared/ambiguous/accepted are never replayed automatically');
       row.state = 'queued'; delete row.delivery_id; out = { event_id: row.event.event_id, state: row.state };
     } else throw new Error('Unknown command; use doctor/register/report-policy/authorize-report/report-context/owned/target/archive-record/restore-record/list/status/remote/complete/notifications/claim/ack/retry');
     rebuildOwners(s); save(file, s);

@@ -49,6 +49,13 @@ private runtime records, not Git-tracked files or prompt-only memory.
 
 ## Before creating a chip
 
+- Before dispatching an automatic callback, verify explicit human permission
+  for completion reporting to THIS parent, not just permission to create a chip
+  or send it `hi`. A general request to build this workflow in another chat is
+  a preference, not sufficient authorization for every future recipient.
+  If the current request does not authorize the return report, explain the
+  exact planned callback and obtain approval in the parent before dispatch.
+  Do not make the child discover this missing approval after it finishes work.
 - Require the Codex app's chat/worktree tools. If absent, explain that app mode
   cannot run here. Do not downgrade to CLI or manufacture a sidebar chat.
 - Native chips are separate user-owned app chats. Create them only when the
@@ -156,6 +163,13 @@ before ending its turn. A crash or turn that cannot start cannot self-report.
 - Record the exact native-tool receipt using `app.cjs ack`. On timeout or uncertain
   acceptance use `ambiguous`, never resend blindly. `accepted` is input acceptance,
   not proof that the parent replied to the user. See the reference for recovery.
+- An automatic approval rejection is a separate `review-rejected` hold, not a
+  transient failure. Stop and explain the exact action and reviewer's reason.
+  Do not retry the same report via another agent, sender, CLI command, hook or
+  copied authorization file. New explicit human approval or a demonstrated
+  safe authorized alternative is required before reconsidering that action.
+  Follow the host's approval-request rules; do not say a preference file or the
+  skill overrides the reviewer.
 - The parent MUST tell the user which chip completed/failed and summarize its
   result in a visible response. Internal logs alone are insufficient. Receipt
   alone does not request replies to children, new work, or merging. Avoid
@@ -189,7 +203,12 @@ excludes it. Ownership remains recorded for audit; archiving never transfers it.
 
 ## Verification boundary
 
-The current app transition is a preview. Official chat creation and a managed
+The current app transition is a preview. A real native completion callback has
+now been rejected by automatic approval review: a new parent's request to create
+a chip and send `hi` did not explicitly authorize a separate return message.
+Do not advertise unconditional automatic callbacks or claim this is fixed by
+passing a general workflow quote. See VALIDATION.md for the observed block.
+Official chat creation and a managed
 worktree were tested. Real parent wake-up/queue semantics and same-live-session
 terminal access have NOT passed app-mode end-to-end validation; the model test
 hit an account usage limit. Do not reuse the old CLI 0.163–0.166 test results as
