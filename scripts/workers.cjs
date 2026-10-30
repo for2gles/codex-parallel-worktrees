@@ -9,7 +9,7 @@ const cp = require('node:child_process');
 const { UnixWebSocket, MAX } = require('./unix-ws.cjs');
 const { Notifications, records: notificationRecords } = require('./notifications.cjs');
 
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const ACTIVE = new Set(['starting', 'running', 'waiting_for_input']);
 const TERMINAL = new Set(['completed', 'failed', 'interrupted', 'disconnected', 'stopped']);
 const APPROVALS = new Set(['item/commandExecution/requestApproval', 'item/fileChange/requestApproval']);
@@ -441,7 +441,7 @@ async function main(argv = process.argv.slice(2)) {
         + 'Your worktree must be clean and committed before starting a child. Children inherit your committed HEAD, not your conversation or uncommitted files. '
         + 'Collect children, review and merge each child into YOUR worktree, then clean children before reporting completion. '
         + 'Use the helpers; do not run workers in a shared directory. No automatic approvals. Commit only assigned files and report checks.\n'
-        + 'Child turn completion is pushed automatically: while you are active it is steered into your turn; when idle it starts a follow-up. Do not duplicate already handled completion event IDs.\n'
+        + (notifyEnabled ? 'Child completion notifications are queued durably while you are busy and delivered in a separate turn when idle. Report the chip ID, completion/failure and result to the user. Notification receipt alone does not request replies to children, new work or merging. Do not duplicate already reported event IDs.\n' : 'Automatic completion notifications are disabled; use status/wait to collect child results.\n')
         + 'Scripts: ' + SCRIPTS + '\nYour ID: ' + ident + '\nCreate child: sh ' + quote(path.join(SCRIPTS, 'start.sh'))
         + ' UNIQUE_CHILD_ID --repo ' + quote(tree) + ' --prompt-file /absolute/task.txt\n'
         + 'Inspect: sh ' + quote(path.join(SCRIPTS, 'list.sh')) + ' --repo ' + quote(state.root_repo) + '\n\n' + task;

@@ -47,12 +47,12 @@ function handle(socket, msg) {
     if (task.startsWith('[하위칩 완료 알림]')) timer = setTimeout(complete, 250);
     else if (task.includes('APPROVE')) { approval = true; wire(socket, { id: 900, method: 'item/commandExecution/requestApproval', params: { threadId: thread, turnId: turn, command: 'fixture only' } }); }
     else if (task.includes('FAST')) complete();
-    else timer = setTimeout(complete, task.includes('SLOW') ? 2000 : 250);
+    else timer = setTimeout(complete, task.includes('HOLD') ? 30000 : task.includes('SLOW') ? 2000 : 250);
   } else if (msg.method === 'turn/steer') {
-    if (task.includes('COMPLETE_BEFORE_STEER')) { complete(); return wire(socket, { id: msg.id, error: { message: 'No matching active turn' } }); }
     if (!timer || p.expectedTurnId !== turn) return wire(socket, { id: msg.id, error: { message: 'No matching active turn' } });
     task += '\n' + p.input[0].text; clearTimeout(timer); timer = setTimeout(complete, 200); result = { turnId: turn };
-  } else if (msg.method === 'turn/interrupt') complete('interrupted');
+  } else if (msg.method === 'test/complete') complete();
+  else if (msg.method === 'turn/interrupt') complete('interrupted');
   else if (!msg.method && msg.id === 900) { complete(msg.result.decision === 'accept' ? 'completed' : 'failed'); return; }
   else return wire(socket, { id: msg.id, error: { message: 'Unknown method' } });
   wire(socket, { id: msg.id, result });

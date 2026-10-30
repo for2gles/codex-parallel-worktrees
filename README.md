@@ -3,6 +3,7 @@
 독립된 Codex 세션을 **하위칩**이라고 부릅니다. 각 하위칩은 별도 Worktree·브랜치·세션·프로세스를 가지며,
 하위칩이 다시 자식 하위칩을 만들 수 있습니다. 메인에서 작업을 분할하고 진행 상태·추가 지시·결과 통합을 관리합니다.
 자식의 턴 완료·실패는 상위칩으로 자동 전달합니다. 상위가 응답을 끝냈어도 서버와 컨트롤러가 살아 있으면 같은 세션에서 후속 턴을 시작합니다.
+메인이 작업 중이면 완료 메시지를 디스크 큐에 보관하고, 현재 턴이 끝난 뒤 사용자에게 완료·실패와 결과 요약을 알립니다.
 
 **Node.js 18+와 Git, 제공된 Codex CLI만 사용합니다. Python·npm install·tmux는 필요 없습니다.**
 macOS/Linux용입니다. 실제 검증 환경과 범위는 [VALIDATION.md](VALIDATION.md)에 기록합니다.
@@ -10,14 +11,14 @@ macOS/Linux용입니다. 실제 검증 환경과 범위는 [VALIDATION.md](VALID
 ## 설치
 
 ```bash
-git clone --branch v0.4.0 https://github.com/for2gles/codex-parallel-worktrees.git "$HOME/.agents/skills/parallel-worktrees"
+git clone --branch v0.4.1 https://github.com/for2gles/codex-parallel-worktrees.git "$HOME/.agents/skills/parallel-worktrees"
 ```
 
 기존 설치를 갱신하려면 로컬 변경이 없는지 확인한 뒤:
 
 ```bash
 git -C "$HOME/.agents/skills/parallel-worktrees" fetch origin --tags
-git -C "$HOME/.agents/skills/parallel-worktrees" checkout v0.4.0
+git -C "$HOME/.agents/skills/parallel-worktrees" checkout v0.4.1
 ```
 
 Codex에서 인식되지 않으면 재실행한 다음 다음과 같이 요청합니다.
@@ -67,11 +68,14 @@ sh "$S/list.sh" --repo "$PWD"
 
 ```text
 자식 턴 완료/실패 → 영구 outbox → 상위 컨트롤러 inbox
-→ 상위 실행 중: turn/steer로 알림 추가
-→ 상위 응답 종료: turn/start로 같은 세션의 후속 턴 시작
+→ 메인 실행 중: 수신 순서대로 큐에 보관, 현재 턴 유지
+→ 메인 응답 종료: turn/start로 같은 세션에서 알림 처리
+→ 메인이 사용자에게 칩 이름·완료/실패·결과 요약 보고
 ```
 
 상위 모델이 `status`·`wait`를 반복 호출할 필요는 없습니다. 승인·입력 대기 중에는 알림을 보관하며 자동 승인하지 않습니다.
+여러 메시지가 대기 중이면 수신 순서대로 한 번에 전달하고, 알림 처리 중 도착한 메시지는 다음 알림 턴으로 넘깁니다.
+알림의 기본 동작은 사용자 보고이며, 알림 자체가 하위칩 회신·추가 작업·자동 병합을 요청하지 않습니다.
 완료는 모델 턴 종료를 뜻하므로, 상위는 실제 변경·검사·통합 상태를 검토해야 합니다.
 
 스킬이 만든 부모→자식 관계는 자동 연결됩니다. **스킬 밖에서 시작한 최상위 세션**은 자식 생성 전에 한 번 등록하세요.

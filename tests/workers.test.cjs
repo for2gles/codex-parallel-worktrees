@@ -36,6 +36,15 @@ async function eventually(check, timeout = 7000) {
 async function delivered(h, ident, count = 1) {
   return eventually(async () => { const n = (await h.cli('notifications', ident))[0]; return n.inbox.length === count && n.inbox.every(r => r.state === 'delivered') ? n : null; });
 }
+async function completeHeld(state) {
+  const ws = await UnixWebSocket.connect(state.server_socket);
+  async function rpc(id, method, params) {
+    await ws.send({ id, method, params });
+    while (true) { const m = await ws.receive(); if (m.id === id) { assert.equal(m.error, undefined); return m.result; } }
+  }
+  try { await rpc(1, 'initialize', { clientInfo: { name: 'fixture-control', version: '1' } }); await rpc(2, 'test/complete', {}); }
+  finally { ws.close(); }
+}
 test('parallel chips: isolation, steer, same-session follow-up, merge and cleanup', async t => {
   const h = await setup(t); const a = await h.start('alpha', 'SLOW\nMAKE alpha.txt a'); const b = await h.start('beta', 'SLOW\nMAKE beta.txt b');
   assert.notEqual(a.thread_id, b.thread_id); assert.notEqual(a.app_server_pid, b.app_server_pid); assert.notEqual(a.worktree, b.worktree);
@@ -139,14 +148,26 @@ test('idle parent is automatically started by child completion without parent po
   await h.wait('parent'); assert.ok((await h.state('parent')).last_message.includes('[하위칩 완료 알림]'));
   const out = (await h.cli('notifications', 'child'))[0].outbox[0]; assert.equal(out.state, 'accepted'); assert.equal(out.event.child_thread_id, child.thread_id);
 });
-test('active parent receives steer and duplicate completion does not create another turn', async t => {
-  const h = await setup(t); const parent = await h.start('parent', 'SLOW', '--notify', 'on');
-  await h.cli('start', 'child', '--parent', 'parent', '--prompt', 'FAST');
-  const notice = await delivered(h, 'parent'); assert.equal(notice.inbox[0].method, 'turn/steer');
-  const out = (await h.cli('notifications', 'child'))[0].outbox[0];
+test('busy parent queues completions durably in arrival order without steering; duplicates report once', async t => {
+  const h = await setup(t); const parent = await h.start('parent', 'HOLD', '--notify', 'on');
+  await h.cli('start', 'first', '--parent', 'parent', '--prompt', 'FAST');
+  await eventually(async () => (await h.cli('notifications', 'parent'))[0].inbox.length === 1);
+  await h.cli('start', 'second', '--parent', 'parent', '--prompt', 'FAST');
+  const queued = await eventually(async () => { const n = (await h.cli('notifications', 'parent'))[0]; return n.inbox.length === 2 ? n : null; });
+  assert.ok(queued.inbox.every(r => r.state === 'queued' && !r.method));
+  assert.deepEqual(queued.inbox.slice().sort((a, b) => a.sequence - b.sequence).map(r => r.event.child_id), ['first', 'second']);
+  const running = await h.state('parent'); assert.equal(running.status, 'running'); assert.equal(running.turn_id, parent.turn_id);
+  assert.equal(running.last_message, '');
+  const out = (await h.cli('notifications', 'first'))[0].outbox[0]; assert.equal(out.state, 'accepted');
   const reply = await control(path.dirname(parent.worktree), { op: 'child-completed', event: out.event }); assert.equal(reply.duplicate, true);
-  await h.wait('parent'); assert.equal((await h.state('parent')).turn_id, parent.turn_id);
-  assert.equal((await h.cli('notifications', 'parent'))[0].inbox.length, 1);
+  await completeHeld(parent);
+  const notice = await delivered(h, 'parent', 2); assert.ok(notice.inbox.every(r => r.method === 'turn/start'));
+  await h.wait('parent'); const reported = await h.state('parent'); assert.equal(reported.turn_id, 'turn-2');
+  assert.ok(reported.last_message.indexOf('"child_id":"first"') < reported.last_message.indexOf('"child_id":"second"'));
+  const events = fs.readFileSync(path.join(path.dirname(parent.worktree), 'events.jsonl'), 'utf8');
+  assert.equal(events.includes('turn/steer'), false);
+  const duplicate = await control(path.dirname(parent.worktree), { op: 'child-completed', event: out.event }); assert.equal(duplicate.duplicate, true);
+  await sleep(100); assert.equal((await h.state('parent')).turn_id, reported.turn_id);
 });
 test('approval waits are preserved; queued child completions wake parent as one batch', async t => {
   const h = await setup(t); await h.start('parent', 'APPROVE', '--notify', 'on');
@@ -158,11 +179,15 @@ test('approval waits are preserved; queued child completions wake parent as one 
   const n = await delivered(h, 'parent', 2); assert.equal(new Set(n.inbox.map(r => r.accepted_turn_id)).size, 1); assert.equal(n.inbox[0].method, 'turn/start');
   await h.wait('parent'); assert.equal((await h.state('parent')).turn_id, 'turn-2');
 });
-test('completion/steer race safely starts a new turn after explicit rejection', async t => {
-  const h = await setup(t); await h.start('parent', 'SLOW COMPLETE_BEFORE_STEER', '--notify', 'on');
-  await h.cli('start', 'child', '--parent', 'parent', '--prompt', 'FAST');
-  const n = await delivered(h, 'parent'); assert.equal(n.inbox[0].method, 'turn/start'); await h.wait('parent');
-  assert.equal((await h.state('parent')).turn_id, 'turn-2');
+test('an already active external main queues a completion until its original turn ends', async t => {
+  const h = await setup(t); const parent = await h.start('main', 'HOLD');
+  await h.cli('bind-parent', '--remote', 'unix://' + parent.server_socket, '--session', parent.thread_id, '--codex', FAKE);
+  await h.start('child', 'FAST', '--notify', 'on');
+  const queued = await eventually(async () => { const n = (await h.cli('notifications')).find(n => n.chip === '$root'); return n.inbox.length ? n : null; });
+  assert.equal(queued.inbox[0].state, 'queued'); assert.equal((await h.state('main')).turn_id, parent.turn_id);
+  await completeHeld(parent);
+  await eventually(async () => (await h.cli('notifications')).find(n => n.chip === '$root').inbox[0].state === 'delivered');
+  await h.wait('main'); assert.equal((await h.state('main')).turn_id, 'turn-2');
 });
 test('failed child turn notifies parent; user-initiated stop does not spuriously wake it', async t => {
   const h = await setup(t); const p = await h.start('parent', 'FAST', '--notify', 'on'); await h.wait('parent');

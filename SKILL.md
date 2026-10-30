@@ -37,13 +37,19 @@ this skill's actual directory; use `--repo` to locate the project registry.
    unique within one repository; use meaningful names such as `api-db`.
    Children may delegate concrete independent subtasks further in the same way.
 5. Child turn completion/failure is pushed automatically to its immediate parent.
-   A running parent receives `turn/steer`; an idle parent gets a new `turn/start`
-   in the SAME session. The server and controller must stay alive. Approval/input
-   waits retain notifications without approving anything. A parent can finish its
+   A busy parent retains messages in its durable inbox without steering or
+   interrupting the current turn. After that turn ends, queued messages are
+   delivered in arrival order in one `turn/start` in the SAME session. Additional
+   arrivals during a report wait for the next report. The server and controller
+   must stay alive. Approval/input waits retain messages without approving anything.
+   On receipt, tell the user which chip completed/failed and briefly summarize
+   its result in a visible response; internal logging alone is insufficient.
+   Receipt alone does not request replies to children, new work, or merging.
+   A parent can finish its
    current response while children work; polling is not required for completion
    delivery. `status.sh`, bounded `wait.sh` and `message.sh` remain available.
    `wait PARENT` includes descendants. Read results, checks and diffs; a completed
-   turn is not proof of correct implementation. Handle event IDs idempotently.
+   turn is not proof of correct implementation. Report each event ID once.
    Inspect `notifications.sh` when delivery fails; never blindly replay ambiguous
    model input. `--notify off` opts into manual coordination and is inherited.
 6. Expose each chip's ID, parent, session ID and worktree to the user. `list.sh`
