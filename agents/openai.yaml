@@ -1,0 +1,3 @@
+interface:
+  display_name: "Parallel Worktrees"
+  short_description: "Control independent Codex workers in Git worktrees"
