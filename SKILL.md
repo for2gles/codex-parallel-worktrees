@@ -1,68 +1,70 @@
 ---
 name: parallel-worktrees
-description: Coordinate independent Codex CLI workers in isolated Git worktrees, inspect their live sessions from other terminals, send follow-up instructions and integrate their commits. Use for independent Codex sessions or parallel worktrees rather than shared-directory subagents.
+description: Create and coordinate independent Codex sessions called 하위칩 in mandatory separate Git worktrees, including nested child chips, live terminal access, follow-up instructions and bottom-up integration. Use for independent coding sessions or parallel worktrees rather than shared-directory subagents.
 ---
 
-# Parallel Worktrees
+# 하위칩 / Parallel Worktrees
 
-Use the bundled shell commands to operate independent Codex app-server processes.
-Each worker MUST have its own persistent thread, branch and registered Git worktree;
-never run two workers in the original checkout or one shared worktree. Requires an existing,
-authenticated Codex CLI, Git and Python 3.9+ on macOS/Linux. No tmux or packages.
+The user calls an independent lower-level Codex session **하위칩** (chip). A chip
+can create further chips. Each chip MUST have its own persistent session,
+registered Git worktree, branch and app-server process. No shared-worktree mode.
+Requires Node.js 18+, Git and an existing authenticated Codex CLI on macOS/Linux.
+No Python, npm install, tmux or other runtime package is needed.
 
-Read [references/commands.md](references/commands.md) for exact commands, exit codes,
-approval handling, recovery and limitations. Resolve script paths relative to this
-skill's actual directory; run commands with `--repo` pointing to the original checkout.
+Read [references/commands.md](references/commands.md) for command arguments,
+remote access, hierarchy, permissions and lifecycle. Resolve script paths from
+this skill's actual directory; use `--repo` to locate the project registry.
 
-## Coordinate the work
+## Work and delegate
 
-1. Run `doctor.sh --repo REPO --probe` to confirm the provided CLI supports the
-   transport. Do not install/upgrade Codex, change its configuration or weaken the
-   environment's restrictions to make workers run. Parent-session permission
-   settings are not automatically inherited by another CLI process; inspect the
-   worker's `effective_policy` and obey the host's requirements.
-2. Inspect the original checkout and requirements. It must have a commit and no
-   uncommitted/untracked files. Do not stash or commit unrelated user work.
-   Split genuinely independent tasks, normally starting with two workers. Give
-   each task its owned files, relevant interfaces, acceptance criteria and checks.
-   All workers start from the current committed HEAD; they cannot see the parent's
-   uncommitted edits or conversation unless you explicitly provide that context.
-3. Start each worker with `start.sh ID --repo REPO --prompt-file TASK`. For an
-   authorized editing task, `--sandbox workspace-write` requests normal scoped writes
-   subject to host requirements; otherwise the CLI's default policy applies. Use the
-   configured model unless the user asks for another. Worker instructions prohibit
-   recursive delegation, pushing, merging and security-configuration changes.
-4. Keep coordinating after launch. Call `status.sh` and bounded `wait.sh` (30 seconds
-   by default). Read results and repeat the wait as necessary while doing useful
-   independent work. Do not end the parent turn merely because workers started.
-   `message.sh` steers an active turn or starts a follow-up turn on the same live
-   thread after completion. Acknowledged steering means input was accepted, not
-   that it has already been acted on. Verify subsequent output.
-   Give the user each worker's ID, session ID and worktree path. For inspection in
-   another terminal, provide `attach.sh ID --repo REPO` (the same live Codex TUI)
-   and `watch.sh ID --repo REPO` (read-only status/output). The attach helper uses
-   the worker's own CLI, Unix server endpoint and existing session ID, with the
-   exact worktree as cwd. Do not use a plain local `codex resume` against an active
-   worker: use the provided same-server command. Attaching must not fork the session
-   or create another worktree. Close attached TUIs before integration/cleanup.
-5. A `waiting_for_input` state includes the exact pending requests. Surface approvals
-   and questions to the user; do not approve or fabricate an answer on the user's
-   behalf. Use `respond.sh` only for an explicitly authorized decision or answer.
-   Never silently retry a timed-out start/steer: input may already have been accepted.
-6. A completed turn is not proof of task correctness. Read `last_message`, inspect
-   the worker diff and commit, verify file ownership and run the agreed checks.
-   Use a follow-up message for corrections while its controller is still live.
-7. Integrate reviewed work with `merge.sh` into the original checkout. It stops the
-   completed worker, requires clean checkouts and committed changes, and leaves
-   merge conflicts visible. Resolve conflicts in the original checkout, or use
-   `git merge --abort` if integration should be abandoned. Never reset user work.
-   Run the combined checks after integration and report their actual results.
-8. Use `cleanup.sh` only after successful integration. It refuses dirty worktrees
-   or commits not present in current HEAD, removes the worktree without force, and
-   preserves its branch and diagnostic records. Stop unused workers with `stop.sh`.
+1. Run `doctor.sh --repo REPO --probe`. Use the supplied CLI and existing provider;
+   never upgrade Codex, change security configuration, or bypass restrictions.
+   Another CLI reads its own configuration; inspect `effective_policy` instead
+   of assuming the parent chat's permissions are inherited.
+2. Compare the task with the committed checkout. Do not stash/commit unrelated
+   user work. A chip starts from a clean, committed HEAD and cannot see a parent's
+   uncommitted edits or conversation. Give it relevant context, owned files,
+   interfaces, acceptance criteria and checks. Start with the independent tasks
+   actually needed, rather than delegating an unchanged task recursively.
+3. Start with `start.sh ID --repo REPO --prompt 'TASK'` or `--prompt-file PATH`.
+   For an authorized editing task, `--sandbox workspace-write` requests normal
+   scoped writes subject to enforced host requirements. Do not override the
+   configured model unless the user requests it.
+4. A chip may start a child using `start.sh CHILD_ID --repo ITS_OWN_WORKTREE ...`.
+   Parent detection is automatic. Alternatively, `--parent PARENT_ID` explicitly
+   chooses that parent's worktree. Child chips inherit the parent's CLI, optional
+   model and requested sandbox unless explicitly overridden. IDs are globally
+   unique within one repository; use meaningful names such as `api-db`.
+   Children may delegate concrete independent subtasks further in the same way.
+5. Keep coordinating: `status.sh`, bounded `wait.sh`, and `message.sh` deliver
+   progress, completion and follow-ups. `wait PARENT` includes its descendants.
+   Do not end a parent turn merely because children started. Read output, verify
+   checks and inspect diffs; a completed turn is not proof of correct implementation.
+6. Expose each chip's ID, parent, session ID and worktree to the user. `list.sh`
+   shows the hierarchy and copyable open commands; `remote.sh ID` prints the
+   remote URI, session ID and full commands. `attach.sh ID` opens the SAME live
+   session on its server and worktree, and `watch.sh ID` only observes output.
+   Never substitute plain local `codex resume` for the same-server attach helper.
+7. Surface `pending_requests` to the user. Use `respond.sh` only for authorized
+   decisions or explicit user answers; never auto-approve requests or invent
+   answers. A timeout can mean input was accepted: inspect state before retrying.
 
-The helper sends no messages to other desktop chats, creates no sidebar chats,
-publishes no repository and uploads no files. Authentication and model traffic
-use the supplied Codex CLI's normal provider configuration. Git worktree isolation
-is not a security boundary. The controller does not wake an ended parent chat;
-completion is delivered through the parent's ongoing status/wait tool calls.
+## Integrate from the leaves upward
+
+Review each child's changes and checks, then call `merge.sh CHILD --repo REPO`.
+The helper always uses the child's recorded immediate parent worktree as its
+target, even when invoked from the original project. It never skips a parent.
+Clean that child after integration, then repeat upward. The parent includes
+merged child commits when it eventually integrates into its own parent.
+
+Close attached TUIs before integration. Merge stops the completed chip, requires
+clean checkouts and committed changes, and preserves Git conflicts for explicit
+resolution or `git merge --abort`. Cleanup refuses dirty/unmerged work and refuses
+to remove a chip while descendant worktrees remain. Stop descendants before
+stopping a parent. Never force-delete worktrees or reset user changes.
+
+Run combined project checks at the final integration target and report actual
+results. Worktrees, branches and logs are independent; Git worktree separation
+is not a security boundary. Runtime records stay in Git's private directory and
+must not be published. This helper sends no messages to other desktop chats,
+creates no sidebar chats, publishes nothing and does not wake an ended parent chat.

@@ -1,82 +1,74 @@
-# Parallel Worktrees
+# 하위칩 / Parallel Worktrees
 
-A local Codex skill for independent worker sessions, mandatory separate Git
-worktrees, live terminal attachment, follow-up instructions and reviewed integration.
-Python standard library only; no tmux, Node.js, package install or CLI upgrade.
+독립된 Codex 세션을 **하위칩**이라고 부릅니다. 각 하위칩은 별도 Worktree·브랜치·세션·프로세스를 가지며,
+하위칩이 다시 자식 하위칩을 만들 수 있습니다. 메인에서 작업을 분할하고 진행 상태·추가 지시·결과 통합을 관리합니다.
 
-## Install
+**Node.js 18+와 Git, 제공된 Codex CLI만 사용합니다. Python·npm install·tmux는 필요 없습니다.**
+macOS/Linux용입니다. 실제 검증 환경과 범위는 [VALIDATION.md](VALIDATION.md)에 기록합니다.
 
-Clone this public repository directly into a skill discovery directory:
+## 설치
 
 ```bash
-git clone --branch v0.2.0 https://github.com/for2gles/codex-parallel-worktrees.git "$HOME/.agents/skills/parallel-worktrees"
+git clone --branch v0.3.0 https://github.com/for2gles/codex-parallel-worktrees.git "$HOME/.agents/skills/parallel-worktrees"
 ```
 
-Codex discovers skills automatically; restart it if the new skill is missing. In Codex:
+기존 설치를 갱신하려면 로컬 변경이 없는지 확인한 뒤:
+
+```bash
+git -C "$HOME/.agents/skills/parallel-worktrees" fetch origin --tags
+git -C "$HOME/.agents/skills/parallel-worktrees" checkout v0.3.0
+```
+
+Codex에서 인식되지 않으면 재실행한 다음 다음과 같이 요청합니다.
 
 ```text
 $parallel-worktrees
-먼저 doctor --probe로 제공된 실행 환경을 확인해줘.
-파일 수정 범위가 겹치지 않는 작업 2개로 나누고 독립 워커를 실행해줘.
-진행 상태를 계속 확인하면서 필요한 추가 지시를 전달하고,
-완료 결과를 검토·병합한 뒤 전체 테스트까지 진행해줘.
+먼저 doctor --probe로 제공된 환경을 확인해줘.
+필요한 독립 작업을 하위칩으로 나눠서 실행해줘.
+하위칩은 필요하면 자식 하위칩을 만들 수 있고, 모든 칩의 Worktree는 분리해야 해.
+진행 상태를 확인하고 자식 결과부터 부모 순서로 검토·통합·검증해줘.
+칩 목록과 다른 터미널에서 접속하는 방법도 보여줘.
 ```
 
-Read [the command reference](references/commands.md) for manual operation,
-approval handling and limits. `SKILL.md` contains the main agent's workflow.
+## 리모트 주소를 외우지 않고 열기
 
-## Another terminal
-
-From your original project checkout, inspect worker `api` in another terminal:
+프로젝트 루트의 다른 터미널에서:
 
 ```bash
 S="$HOME/.agents/skills/parallel-worktrees/scripts"
-bash "$S/attach.sh" api --repo "$PWD"
+sh "$S/list.sh" --repo "$PWD"
+sh "$S/remote.sh" api --repo "$PWD"
+sh "$S/attach.sh" api --repo "$PWD"
 ```
 
-This opens the same live Codex session on the same worker server and worktree.
-It works while the worker is running and after it finishes. No new session or
-worktree is created. Exit the attached TUI with `/exit`; work continues on the
-server. To observe output without sending input:
+- `list.sh`: 부모→자식 칩 목록, 상태, 세션 ID, Worktree, 복사할 접속 명령
+- `remote.sh api`: 해당 칩의 리모트 주소·전체 세션 ID·접속 명령
+- `attach.sh api`: 같은 실행 중 세션을 Codex 터미널 화면으로 열기
+- `watch.sh api`: 입력 없이 상태와 출력만 보기
+
+여기서 접속에 필요한 것은 로컬 Unix 소켓 주소와 세션 ID의 조합입니다.
+`attach.sh`가 둘 다 찾아주므로 직접 입력할 필요가 없습니다. 접속 화면에서 `/exit`하면 화면만 닫히고 칩은 유지됩니다.
+접속은 칩 서버가 살아 있는 동안, 즉 `merge`·`stop` 전까지 가능합니다. 기록은 정리 후에도 `watch`로 확인할 수 있습니다.
+
+## 자식 하위칩
 
 ```bash
-bash "$S/watch.sh" api --repo "$PWD"
+sh "$S/start.sh" api --repo "$PWD" --sandbox workspace-write --prompt 'API 작업. 필요하면 자식 칩을 만들고 결과를 먼저 통합해줘.'
+sh "$S/start.sh" api-db --repo "$PWD" --parent api --prompt 'DB 부분을 구현·검증·커밋해줘.'
+sh "$S/list.sh" --repo "$PWD"
 ```
 
-Attach while the worker server is alive, before `merge` or `stop`. Saved output
-remains readable with `watch` after stopping/cleanup. Close the TUI before integration.
+하위칩 내부에서 자신의 Worktree를 `--repo`로 넘겨 자식을 생성해도 부모 관계가 자동 기록됩니다.
+자식은 부모의 현재 커밋에서 분기합니다. 따라서 자식 생성 전 부모의 작업 내용이 커밋돼 있고 Worktree가 깨끗해야 합니다.
+자식 결과는 **자식→해당 부모→상위 부모** 순서로 합칩니다. 자식 Worktree가 남아 있으면 부모 정리를 거부합니다.
 
-Every worker has a separate branch, registered worktree, app-server process and
-session ID. Sharing the original checkout or another worker's worktree is not
-an available mode. `status.sh` lists the IDs, paths and exact terminal commands.
+승인 요청은 자동 승인하지 않습니다. 제공된 Codex나 보안 설정을 변경하지 않으며, Cofa에서의 실행 허용 여부는 해당 환경에서 확인해야 합니다.
+상세 명령과 제한은 [명령 설명](references/commands.md)을 참고하세요.
 
-## Compatibility
-
-Real worker and same-session terminal attachment tests passed with Codex CLI
-**0.163.0 and 0.164.0** on macOS arm64. See [VALIDATION.md](VALIDATION.md).
-Version 0.2.0 uses a private Unix WebSocket server per worker so the controller
-and terminal can connect simultaneously. No TCP listener is opened. Version 0.1.1 fixed the optional
-`--sandbox` wire value; use `--sandbox workspace-write` for normal scoped edits.
-
-Requires Python 3.9+, Git, macOS/Linux and a supplied, authenticated Codex CLI
-supporting `codex app-server --listen unix://...`, `codex resume --remote`, and
-v2 thread/turn methods. Uses one
-independent app-server process and thread per worker. Version-specific behavior
-must be tested with the actual target CLI. A successful local run does not
-establish compatibility with an assessment platform.
-
-The helper never overrides security/approval/provider configuration. Another CLI
-process reads its own effective configuration; a desktop chat's permissions are
-not automatically inherited. Pending requests are exposed for explicit user
-decisions. Runtime data stays in Git's private directory and is never pushed by
-this helper. Do not upload task prompts, execution logs, credentials or assessment
-materials when sharing the skill. Publish only the reusable skill source.
-
-## Validation
+## 검증
 
 ```bash
-python3 -m unittest discover -s tests -v
+node --test tests/*.test.cjs
 ```
 
-See [VALIDATION.md](VALIDATION.md) for measured checks and outstanding limits.
-Protocol reference: [Codex App Server](https://learn.chatgpt.com/docs/app-server).
+인증 정보·실행 로그·과제 자료는 공개 저장소에 올리지 마세요. 이 패키지에는 재사용 가능한 소스만 포함합니다.

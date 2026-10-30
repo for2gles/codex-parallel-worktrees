@@ -1,113 +1,66 @@
-# Validation
+# 검증 기록 — v0.3.0
 
-Validated locally on 2026-10-30. This is a small first version, not a claim of
-compatibility with every Codex version or assessment environment.
+2026-10-30, macOS arm64, Node.js **22.23.4**에서 검증했습니다.
+런타임과 테스트를 Node로 전환했으며 Python 소스·테스트 의존성을 제거했습니다.
+목표 런타임은 Node.js 18+입니다. 이 환경에서 직접 실행한 버전은 22.23.4입니다.
+추가 npm 패키지는 사용하지 않습니다.
 
-## Automated orchestration checks
+## 자동 검증
 
-21 tests passed on both Python 3.9.6 and Python 3.15.1, comprising 17 integration
-tests with real temporary Git repositories and an independent fake app-server,
-plus four WebSocket transport tests:
+```bash
+node --test tests/*.test.cjs
+```
 
-- Independent worker processes, thread IDs and worktrees.
-- Steering an active turn and starting a follow-up turn in the same thread.
-- Explicit approval acceptance/decline and early wait return for pending input.
-- Dirty original checkout, dirty worker and unmerged-commit protection.
-- Invalid/duplicate worker IDs and worker startup failure.
-- Completion-before-response race, bounded wait and interruption.
-- Git merge conflicts left intact for manual resolution.
-- Socket/app-server handshake without starting a model turn.
-- Explicit sandbox mode normalization and protocol validation.
-- Same-server terminal command construction, private socket permissions, external
-  client observation, externally started turns, read-only watching and worktree
-  branch validation.
-- Fragmented text with interleaved ping/pong, long masked client messages,
-  oversized inbound frames and invalid server masking.
+16개 테스트: 실제 임시 Git 저장소와 독립 구현한 가짜 App Server를 사용하는 통합 테스트 12개,
+WebSocket 전송 테스트 4개입니다. 검증 범위:
 
-The skill-creator frontmatter/scaffold validator passed. The runtime itself
-requires no third-party Python packages.
+- 별도 세션·프로세스·Worktree, 실행 중 지시, 같은 세션의 후속 턴, 병합·정리
+- 부모→자식→손자 3단계, 부모 자동 감지·명시 지정, CLI 상속, 서로 다른 Worktree/세션
+- 손자→자식→부모→원본 순서의 실제 Git 병합과 정리
+- 활성 자손이 남은 부모 종료 거부, 자손을 포함한 완료 대기
+- 트리 목록과 리모트 정보, 같은 서버·세션·Worktree를 사용하는 접속 명령
+- 명시적 승인 전 대기와 거부 시 실패 처리
+- 미커밋 원본/칩, 중복·잘못된 ID, 미병합 커밋 보호
+- 충돌 상태 보존과 `git merge --abort`
+- 읽기 전용 관찰, Worktree 브랜치 교체 시 접속 거부
+- 두 번째 연결의 동일 세션 관찰과 외부 TUI가 시작한 턴 추적
+- 빠른 완료·프로세스 실패·중단·대기 만료 구분, 모델 호출 없는 진단
+- Unicode 조각 프레임·ping/pong, 긴 masked 프레임, 크기 제한·잘못된 masking
 
-## Real Codex 0.164.0 smoke test
+Node와 shell 문법 검사, 스킬 frontmatter 검증도 수행합니다.
 
-Environment: macOS arm64, Codex CLI 0.164.0, configured model gpt-6.1-sol,
-Python 3.15.1. Used a disposable local repository with no assessment material.
+## 실제 Codex 검증
 
-1. Started two separate app-server processes and two separate persistent threads
-   from the same baseline commit in different Git worktrees.
-2. Worker A created an addition function plus two unit tests. A live steer added
-   a negative-number acceptance criterion, which appeared in its committed test.
-3. Worker B created a greeting function plus two unit tests. Both workers passed
-   their two tests and committed only their assigned files.
-4. Confirmed approval requests were visible and remained pending until explicitly
-   answered. The real CLI's inherited policy was readOnly/on-request; no bypass
-   flags or security configuration changes were used.
-5. Started a new turn after Worker A completed. Its thread ID was unchanged and
-   it correctly answered a follow-up about the existing addition function.
-6. Reviewed both commits, merged them into the original checkout, and independently
-   ran all four unit tests successfully.
-7. Removed both merged worktrees with cleanup. The original checkout was clean,
-   only its original worktree remained registered, and branches were preserved.
+기존 설치 **0.164.0**을 유지하고, 공식 배포본 **0.163.0**을 별도 테스트 경로에서 실행했습니다.
+기존 인증·모델 설정을 사용했고 보안 우회 인자나 설정 변경은 하지 않았습니다.
 
-## Real Codex 0.163.0 compatibility test
+### Node 기반 0.164.0 재귀 하위칩
 
-Downloaded the official macOS arm64 package from the
-[OpenAI 0.163.0 release](https://github.com/openai/codex/releases/tag/rust-v0.163.0)
-into a separate test directory; the installed 0.164.0 executable was unchanged.
-Verified its SHA-256 against the release asset digest:
-`b0344fc2e41f15e0071147e5869008047b8ff4bf2c4a8897975d3bae3f103b34`.
+1. 독립 `node-parent` 칩을 시작하고 자신의 자식 `node-leaf` 하나를 helper로 생성하게 했습니다.
+2. 자식의 `parent_id`와 별도 Worktree·세션·프로세스를 확인했습니다. CLI와 workspace-write 요청이 상속됐습니다.
+3. 자식이 CommonJS cube 함수와 `node:assert` 양수·음수 검사 파일을 작성·검증·커밋했습니다.
+4. 부모가 자식 diff를 확인하고 helper로 자신의 Worktree에 병합·정리한 뒤 Node 검사를 재실행했습니다.
+5. 원본에서도 결과를 확인하고 부모 커밋을 통합·검증·정리했습니다.
+6. 소켓·Git 권한 요청은 정확한 내용을 확인한 후 개별 승인했으며, 스킬 자체의 자동 승인은 없습니다.
 
-- Confirmed `codex-cli 0.163.0`, socket/stdio initialization and actual skill discovery.
-- Generated the version's protocol schemas and checked the worker's thread/turn methods.
-- Found and fixed a v0.1.0 optional-mode bug: thread/start `sandbox` uses
-  `workspace-write` / `read-only`, while sandbox policy objects use camel-case
-  type names. This distinction applies to both tested CLI versions. v0.1.1 sends
-  the correct wire values and accepts old camel-case CLI aliases for compatibility.
-- Started two distinct app-server processes and persistent threads in isolated
-  worktrees with explicit normal `workspace-write` mode.
-- Worker A implemented multiplication and two tests. An active-turn steer added
-  a negative-number criterion, which appeared in its committed test.
-- Worker B implemented a square function and two tests. Both workers passed their
-  tests and committed only their assigned files after explicit Git approval.
-- A post-completion follow-up kept Worker A's thread ID and returned the correct answer.
-- Reviewed and merged both commits, independently passed all four combined unit tests,
-  removed the worktrees and confirmed the original checkout was clean.
+### Node 기반 0.163.0 접속
 
-The compatibility test used the same configured gpt-6.1-sol model and Python 3.15.1.
+- Node 구현으로 세션 생성·모델 응답(`NODE163_READY`)을 확인했습니다.
+- `remote.sh`에서 리모트 URI·세션 ID·Worktree·복사할 명령이 함께 출력됐습니다.
+- Node `attach.sh`가 띄운 실제 Codex 0.163.0 TUI에 같은 프롬프트와 응답이 표시됐습니다.
+- `/exit`로 TUI를 닫았고 서버는 유지됐습니다.
 
-## v0.2.0: separate-terminal attachment (0.163.0 and 0.164.0)
+이전 v0.2.0에서도 0.163.0·0.164.0의 실제 TUI 접속, 실행 중 관찰, TUI 입력의 메인 추적,
+분리 후 계속 실행을 검증했습니다. 해당 버전의 검증 기록은 Git 태그에 보존합니다.
 
-- Switched worker transport from exclusive stdio to a private Unix WebSocket
-  endpoint, which both the controller and Codex TUI can connect to simultaneously.
-  It uses the Python standard library and opens no TCP port.
-- Started distinct 0.163.0 and 0.164.0 server processes with independent threads,
-  branches and registered Git worktrees from the same disposable original checkout.
-- Opened `attach.sh` in two separate PTY terminals. Both real Codex TUIs resumed
-  their intended session and displayed its worktree, original prompt, command
-  activity and output. The 0.164.0 TUI observed the original in-flight turn.
-- Checked session, turn and worktree IDs before/after attachment: all were
-  unchanged. Attachment did not fork a conversation or restart a turn.
-- Submitted a short no-tools follow-up from each TUI. Both answers appeared in
-  the TUI and in the main controller's state under their original thread IDs.
-- Exited each TUI normally with `/exit`. Both reported disconnection while work
-  continued; the controller then started another turn on each same session.
-- Watcher subprocesses and automatic integration tests verify read-only inspection;
-  changed worktree branches are rejected rather than silently attaching elsewhere.
+## 제한
 
-These terminal checks are specific to macOS arm64 with the two actual CLI versions.
-The Cofa execution environment has still not been accessed.
+- Cofa에는 접속하거나 테스트하지 않았습니다. 제공 Node 버전, CLI 버전, 자식 프로세스·Unix 소켓·Git 권한은 현장에서 확인해야 합니다.
+- 이 채팅의 기본 샌드박스는 Unix 소켓을 제한하므로 테스트는 별도 승인된 로컬 실행 권한으로 수행했습니다.
+  이것이 제한된 플랫폼에서의 우회 허용을 의미하지는 않습니다.
+- 실행 기록·인증 파일·실제 테스트 과제 파일은 공개 패키지에 포함하지 않습니다.
+- 비정상 종료 시 자동 복구·잠금 삭제·입력 재생은 하지 않습니다.
+- 세션과 Worktree는 별개로 분리되지만 동일 사용자 로컬 실행은 보안 격리 경계가 아닙니다.
+- 메인 채팅은 계속 상태를 조회해야 하며 종료된 채팅을 자동으로 깨우지 않습니다.
 
-## Limits
-
-- This chat's outer sandbox denied local Unix sockets. Local integration and real
-  smoke tests ran with separately authorized local execution permissions. This
-  does not establish that a restricted target environment will permit sockets or
-  independent child processes. `doctor --probe` checks sockets and the handshake.
-- No Cofa environment was accessed or tested. Its provided CLI version,
-  authentication, policy and submission behavior still require verification.
-- Optional `--sandbox workspace-write` is a normal Codex mode request, subject to
-  host requirements. It was exercised with 0.163.0; the 0.164.0 smoke test used
-  inherited read-only settings with explicit per-operation approvals.
-- No automatic recovery, worker-to-worker messaging or parent-chat wakeup was tested
-  or implemented. The parent must stay active and use status/wait.
-- No generated source, task prompts, auth files or raw runtime logs are included
-  in this public package.
+프로토콜: [공식 Codex App Server 문서](https://learn.chatgpt.com/docs/app-server).

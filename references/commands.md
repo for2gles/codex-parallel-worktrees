@@ -1,156 +1,114 @@
-# Commands
+# 하위칩 명령
 
-Let `S` be this skill's absolute `scripts` path and `R` the original checkout.
-Run `bash "$S/COMMAND.sh" ...`; executable bits are not required. Python 3.9+,
-Git, an existing authenticated Codex CLI, and Unix sockets are required.
+`S`는 이 스킬의 `scripts` 절대 경로, `R`은 원본 프로젝트 경로입니다.
+모든 명령은 Node.js 18+만 사용합니다. 실행 권한이 없어도 `sh "$S/명령.sh"`로 실행할 수 있습니다.
 
-```bash
-bash "$S/doctor.sh" --repo "$R" --probe
-bash "$S/start.sh" api --repo "$R" --prompt-file /absolute/path/api-task.txt
-bash "$S/start.sh" ui --repo "$R" --prompt 'Implement the UI in ui/; test it and commit only task files.'
-bash "$S/status.sh" --repo "$R"
-bash "$S/message.sh" api --repo "$R" --prompt 'Use the agreed response schema; update the tests.'
-bash "$S/wait.sh" api ui --repo "$R" --timeout 30
-bash "$S/merge.sh" api --repo "$R"
-bash "$S/merge.sh" ui --repo "$R"
-# Run the combined project checks, then:
-bash "$S/cleanup.sh" api --repo "$R"
-bash "$S/cleanup.sh" ui --repo "$R"
-```
-
-`doctor --probe` checks the local socket and performs the Unix WebSocket app-server handshake; it spends no model tokens.
-It does not prove model access, editing, steering or Cofa compatibility. `start`
-accepts `--codex /existing/executable` and optional `--model MODEL`; otherwise it
-uses PATH and the CLI's configured model. It never upgrades anything. No sandbox,
-approval, provider or model configuration is overridden by default. For an
-authorized editing task, `start --sandbox workspace-write` requests the normal
-workspace-write mode, subject to the host's enforced requirements. `read-only` is
-also supported. No full-access mode or approval-bypass option is exposed.
-
-## State and completion
-
-State is under `$(git rev-parse --git-common-dir)/parallel-worktrees/ID/`:
-`state.json`, `events.jsonl`, `messages.log`, `controller.log`,
-`app-server.stderr.log`, and `worktree/`. Git's private directory excludes these
-files from commits. Logs contain prompts and model/tool output: do not publish
-them. The short local socket path is under the current user's private temporary
-runtime directory. No TCP listener is opened by this helper.
-
-`status` returns all known workers, or specified IDs. `wait` does a bounded wait
-and returns early when any worker needs input. Exit codes:
-
-| Code | Meaning |
-|---|---|
-| 0 | All selected turns completed (`status` always uses 0 if it can read state) |
-| 1 | Failure, interruption, disconnected controller, or command error |
-| 2 | Wait deadline reached; workers are still active |
-| 3 | Approval or user input needed; inspect `pending_requests` |
-
-`last_message` is the last completed agent message. `completed` describes the
-model turn, not a successful implementation/test run. Always review the diff.
-An RPC timeout is ambiguous: check state and events before deciding to resend.
-
-## Inspect the same session from another terminal
-
-Every worker has a mandatory separate registered Git worktree and branch. `status`
-includes `id`, `thread_id`, `worktree`, `branch`, `server_socket` and a copyable
-`terminal_command`. To open a worker's existing session in another terminal:
+## 시작·조회·지시
 
 ```bash
-bash "$S/attach.sh" api --repo "$R"
+sh "$S/doctor.sh" --repo "$R" --probe
+sh "$S/start.sh" api --repo "$R" --sandbox workspace-write --prompt '작업 범위와 검증 조건'
+sh "$S/start.sh" ui --repo "$R" --prompt-file /absolute/task.txt
+sh "$S/list.sh" --repo "$R"
+sh "$S/status.sh" api --repo "$R"
+sh "$S/message.sh" api --repo "$R" --prompt '추가 조건'
+sh "$S/wait.sh" api ui --repo "$R" --timeout 30
 ```
 
-This runs the worker's own CLI as:
+`doctor --probe`는 실제 Unix WebSocket 연결만 확인하며 모델 턴은 시작하지 않습니다.
+인증·모델 접근·편집·대회 환경 허용까지 입증하는 검사는 아닙니다.
+`start`는 `--codex /existing/codex`, `--model MODEL`, `--sandbox read-only|workspace-write`를 선택적으로 받습니다.
+지정하지 않으면 기존 CLI 설정을 사용하고, 자식은 부모의 CLI·명시된 모델·요청 sandbox를 이어받습니다.
+기존 camel-case sandbox 인자도 정상 wire 값으로 변환합니다. Full-access나 승인 우회 인자는 제공하지 않습니다.
 
-```text
-codex resume --remote unix://WORKER_SOCKET --cd WORKER_WORKTREE SESSION_ID
-```
-
-It connects to the SAME running app-server and session; it does not create/fork
-a session or share another worker's directory. It works during an active turn
-and after completion while the controller remains alive. The TUI can send input
-to that session; the parent continues tracking those turns. Normal Codex folder
-trust/approval prompts may appear. Resolve them normally without bypass flags.
-
-For observation without interacting with Codex:
+## 부모→자식→손자
 
 ```bash
-bash "$S/watch.sh" api --repo "$R"
-# Optional bounded observation, useful in scripts:
-bash "$S/watch.sh" api --repo "$R" --timeout 10 --interval 0.5
-# Print the exact same-server TUI command:
-bash "$S/attach.sh" api --repo "$R" --print
+sh "$S/start.sh" api-db --repo "$R" --parent api --prompt 'DB 작업'
+# 하위칩 내부에서는 --repo에 자신의 Worktree를 주면 부모를 자동으로 감지합니다.
+sh "$S/start.sh" api-db-tests --repo /absolute/api-db/worktree --prompt '독립 테스트 작업'
 ```
 
-`watch` shows session/path/branch, state transitions and model output, and never
-starts a turn. Ctrl-C closes the watcher only. It can also read preserved output
-after a worker is stopped. `attach` needs an interactive terminal (or `--print`).
-Use the TUI's normal exit when finished; close it before merging/cleaning a worker.
-`merge`/`stop` closes the worker server, so a connected TUI loses its connection.
-After `cleanup`, that worktree no longer exists. No automatic recovery/replay is
-provided for a stopped controller.
+모든 칩 ID는 저장소 안에서 유일해야 합니다. 사용했던 ID를 덮어쓰지 않습니다.
+상태에 `parent_id`, `depth`, `root_repo`, `repo`(직접 부모의 통합 경로), `worktree`를 기록합니다.
+자식의 기준은 **직접 부모의 현재 커밋**입니다. 대화·미커밋 변경은 자동 복제되지 않습니다.
+부모 Worktree가 더러우면 자식 생성을 거부합니다. 같은 작업을 그대로 재귀 위임하지 마세요.
 
-Only use the printed `--remote unix://...` resume command for a running worker.
-A plain local `codex resume SESSION_ID` can create a competing server-side owner.
-The local Unix endpoint is protected by a private user directory and mode 0600;
-no TCP port is opened. Runtime logs and absolute paths must not be published.
+`wait PARENT`는 그 아래 자손도 포함하며, 어떤 자손이든 입력이 필요하면 즉시 반환합니다.
+상위 칩을 멈추기 전에 실행 중인 자손부터 멈추세요. 칩 생성에 필요한 프로세스·Git·소켓 권한은 실행 환경이 판단합니다.
 
-## Responding to requests
-
-Show the full pending method/params to the user. For an explicitly authorized
-command/file decision, use the request ID from `status`:
+## 리모트 정보와 다른 터미널
 
 ```bash
-bash "$S/respond.sh" api 123 --repo "$R" --decision accept
-# Or --decision decline / --decision cancel.
+sh "$S/list.sh" --repo "$R"
+sh "$S/list.sh" --repo "$R" --json
+sh "$S/remote.sh" api-db --repo "$R"
+sh "$S/remote.sh" api-db --repo "$R" --json
+sh "$S/attach.sh" api-db --repo "$R"
+sh "$S/attach.sh" api-db --repo "$R" --print
+sh "$S/watch.sh" api-db --repo "$R"
+sh "$S/watch.sh" api-db --repo "$R" --timeout 10 --interval 0.5
 ```
 
-For other server requests, `--json-file /absolute/path/response.json` sends the
-protocol-specific result verbatim. This is for explicit user answers only; it is
-not a general approval shortcut. Unknown requests remain pending. The response
-schema depends on the installed Codex version; inspect its generated schema or
-the [App Server documentation](https://learn.chatgpt.com/docs/app-server).
+접속에 필요한 값은 **리모트 URI와 세션 ID**입니다.
+`remote --json`은 `chip`, `parent`, `session_id`, `worktree`, `remote`, `attach_command`, `terminal_command`를 반환합니다.
+`attach`는 저장된 CLI로 `codex resume --remote unix://SOCKET --cd WORKTREE SESSION_ID`를 실행합니다.
+새 세션을 만들거나 포크하지 않습니다. 독립된 터미널에서 동일한 실행 중 세션과 완료된 턴을 볼 수 있습니다.
+TUI에서 추가 입력을 보내도 메인 컨트롤러가 같은 세션의 새 턴을 계속 추적합니다.
+일반적인 폴더 신뢰·승인 화면은 정상 절차로 처리합니다. `/exit`로 TUI만 닫을 수 있습니다.
 
-## Stop and recovery
+`watch`는 조회만 하며 턴을 시작하지 않습니다. Ctrl-C는 관찰 화면만 닫습니다.
+`attach`는 대화형 터미널이 필요하며, 서버를 멈추는 `merge`·`stop` 전까지만 가능합니다.
+병합 전에 붙어 있는 TUI를 닫으세요. `cleanup` 후 Worktree는 없어지지만 상태와 출력 기록은 유지됩니다.
+실행 중인 칩을 일반 로컬 `codex resume`로 열어 경쟁하는 서버 소유자를 만들지 마세요.
+
+## 입력·승인
+
+`waiting_for_input`의 `pending_requests`에는 정확한 요청 ID·method·params가 있습니다.
+사용자가 허용한 결정이나 명시적인 답변에만 다음 명령을 사용합니다.
 
 ```bash
-bash "$S/stop.sh" api --repo "$R"
+sh "$S/respond.sh" api 123 --repo "$R" --decision accept
+sh "$S/respond.sh" api 123 --repo "$R" --decision decline
+sh "$S/respond.sh" api REQUEST_ID --repo "$R" --json-file /absolute/answer.json
 ```
 
-Stop interrupts an active turn, waits for confirmation, and closes its owned
-app-server process. It does not signal arbitrary PIDs loaded from disk. Stopped
-controllers cannot receive `message` or `attach`; inspect the preserved thread/worktree and
-continue manually with the supplied CLI if necessary. A crashed controller is
-reported as disconnected; no automatic restart/replay occurs. Worker IDs are not
-reused and failed worktrees/branches are retained for diagnosis.
+`--decision`은 command/file 승인에만 사용합니다. 그 외 요청의 result는 해당 CLI 버전 스키마에 맞는 JSON을 직접 전달합니다.
+알 수 없는 요청은 자동 처리하지 않습니다. RPC timeout 뒤에는 이미 입력이 수신됐을 수 있으므로 상태와 이벤트부터 확인하세요.
 
-If the controller dies while a worker is active, do not merge or clean up until
-you have inspected its actual process state and files. The helper deliberately
-refuses automatic cleanup of that ambiguous state. If a merge fails due to a
-conflict, resolve it in the original checkout and commit, or `git merge --abort`.
-`merge` stops the worker before checking dirty files; finish any missing commit
-manually if that check fails. Do not put diagnostic files into a commit.
-
-## What this version does not promise
-
-- No automatic push, publishing, force cleanup, conflict resolution or test choice.
-- No unsolicited wakeup of an ended parent chat; the main agent must keep waiting.
-- No direct worker-to-worker mailbox; the main agent relays relevant changes.
-- No A2A service, remote daemon, Windows support or automatic crash recovery.
-- No guarantee that a fixed Cofa CLI version supports this protocol or permits
-  child processes/sockets. Try `doctor --probe`, then one tiny real task in the
-  allowed environment. If restricted, use the platform's supported workflow.
-
-## Local validation
-
-From the skill directory:
+## 통합·정리
 
 ```bash
-python3 -m unittest discover -s tests -v
+sh "$S/merge.sh" api-db-tests --repo "$R"
+sh "$S/cleanup.sh" api-db-tests --repo "$R"
+sh "$S/merge.sh" api-db --repo "$R"
+sh "$S/cleanup.sh" api-db --repo "$R"
+sh "$S/merge.sh" api --repo "$R"
+# 원본에서 통합 검증을 실행한 뒤:
+sh "$S/cleanup.sh" api --repo "$R"
 ```
 
-These tests use an independent fake Unix WebSocket app-server with a deterministic
-JSONL backend, plus real temporary Git repositories. Transport tests also cover
-fragmentation, ping/pong, masking and length limits.
-They exercise orchestration and Git invariants, not model behavior. A separate
-real CLI smoke test is required for actual provider/version compatibility.
+통합 대상은 각 칩에 기록된 **직접 부모 Worktree**입니다. 원본에서 명령을 실행해도 자식을 최상위로 건너뛰어 병합하지 않습니다.
+완료·커밋·깨끗한 작업 상태를 검사하고, 자손 Worktree가 남은 부모의 병합·정리는 거부합니다.
+충돌은 그대로 두므로 직접 해결해 커밋하거나 `git merge --abort`로 중단하세요.
+정리는 강제 삭제하지 않으며 미반영 커밋·사용자 변경을 보호합니다. 브랜치와 진단 기록은 보존합니다.
+
+```bash
+sh "$S/stop.sh" api-db-tests --repo "$R"
+sh "$S/stop.sh" api-db --repo "$R"
+sh "$S/stop.sh" api --repo "$R"
+```
+
+## 상태·실패·제한
+
+`wait` 종료 코드: 0=선택한 모든 칩/자손의 턴 완료, 1=실패·중단·연결 끊김, 2=대기 시간 만료, 3=승인/입력 필요.
+`completed`는 모델 턴 종료만 뜻합니다. 구현·테스트·통합 성공은 결과를 별도로 검증해야 합니다.
+
+런타임은 `$(git rev-parse --git-common-dir)/parallel-worktrees/ID/`에 저장합니다.
+`state.json`, `events.jsonl`, `messages.log`, `controller.log`, `app-server.stderr.log`는 프롬프트와 작업 내용을 포함할 수 있으므로 공개하면 안 됩니다.
+Unix 소켓은 사용자 전용 0700 임시 디렉터리와 0600 소켓으로 보호합니다. TCP 포트는 열지 않습니다.
+
+원자적 디렉터리 잠금(`*.lockdir`)은 프로세스가 비정상 종료되면 남을 수 있습니다. 자동 삭제·임의 PID 종료·자동 재실행은 하지 않습니다.
+연결 끊김이나 잠금 잔존 시 실제 프로세스와 Worktree를 조사한 뒤 복구해야 합니다. 실패한 칩도 진단을 위해 보존합니다.
+중단된 컨트롤러는 `attach`나 `message`를 받지 못합니다. 종료된 메인 채팅을 자동으로 깨우는 기능도 없습니다.
+Codex 프로토콜은 [공식 App Server 문서](https://learn.chatgpt.com/docs/app-server)를 참고합니다.
