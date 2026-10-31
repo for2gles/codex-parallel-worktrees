@@ -139,7 +139,9 @@ does NOT establish the lifetime of a helper under a separate user-owned app
 chip, nor wake-up after the root itself has ended its response. Do not close an
 app chip relying on those unverified assumptions. Its own notification wait
 remains an option while the main stays free. No polling-free, durable daemon
-or guaranteed after-root-turn delivery is claimed.
+or delivery after all model turns stop is claimed. A separate native-app test
+has now verified parent wake-up after its response ended while the completing
+app child remained alive; that test does not establish helper-only survival.
 
 ## Completion means user-visible reporting
 
@@ -216,9 +218,12 @@ now been rejected by automatic approval review: a new parent's request to create
 a chip and send `hi` did not explicitly authorize a separate return message.
 Do not advertise unconditional automatic callbacks or claim this is fixed by
 passing a general workflow quote. See VALIDATION.md for the observed block.
-Official chat creation and a managed
-worktree were tested. Real parent wake-up/queue semantics and same-live-session
-terminal access have NOT passed app-mode end-to-end validation; the model test
-hit an account usage limit. Do not reuse the old CLI 0.163–0.166 test results as
+A new app-mode test with direct human authorization passed: completion was
+queued while the parent was active, the parent ended without waiting, and the
+live child sent one native report that restarted the parent and produced a
+visible user report. This verifies that route, not unconditional delivery under
+all permissions, shutdowns, or races. Same-live-session terminal access and
+notification-helper survival after the app child itself ends remain unverified.
+Do not reuse the old CLI 0.163–0.166 test results as
 evidence for app mode. Do not guess an app socket or use local resume to create
 a competing session owner. State unavailable capabilities plainly.
