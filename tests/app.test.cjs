@@ -194,3 +194,24 @@ test('an existing failed delivery with a review rejection receipt migrates to a 
   assert.throws(() => h.run('retry', { event: event.event.event_id }), /review-rejected/);
   assert.equal(h.claim().action, 'empty');
 });
+test('worker handoff carries the exact human source and parent without widening recipients', t => {
+  const h = fixture(t), c = h.register('one');
+  const context = h.run('worker-context', { ids: ['one'] });
+  assert.equal(context.verification_request.arguments.threadId, c.parent_thread_id);
+  assert.equal(context.verification_request.user_message_id, 'human-message');
+  assert.ok(context.prompt.includes(c.parent_thread_id));
+  assert.ok(context.prompt.includes(context.report_authorization.quote));
+  assert.throws(() => h.run('worker-context', { ids: ['one'], 'owner-thread': 'other-parent' }), /different parent/);
+  h.complete('one'); const prepared = h.claim();
+  assert.ok(prepared.arguments.prompt.includes('human-message'));
+  assert.equal(prepared.arguments.threadId, c.parent_thread_id);
+});
+test('a worker without reporting authorization cannot receive a notification handoff', t => {
+  const h = fixture(t); h.register('one', {}, false);
+  assert.throws(() => h.run('worker-context', { ids: ['one'] }), /verified authorization/);
+});
+test('an error receipt cannot be acknowledged as accepted by caller mistake', t => {
+  const h = fixture(t); h.register('one'); h.complete('one'); const d = h.claim();
+  const file = path.join(h.temp, 'native-error.json'); fs.writeFileSync(file, JSON.stringify({ isError: true, content: [{ type: 'text', text: 'Request failed before acceptance' }] }));
+  assert.equal(h.run('ack', { delivery: d.delivery_id, status: 'accepted', 'receipt-file': file }).state, 'failed');
+});

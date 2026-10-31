@@ -96,6 +96,12 @@ private runtime records, not Git-tracked files or prompt-only memory.
    alone never grants messaging authority. Save the actual evidence and record
    it with `authorize-report` after registration. Never insert a blanket
    "no permission, queue only" instruction without checking the human history.
+   Generate `app.cjs worker-context CHIP --repo REPO --owner-thread PARENT
+   --owner-host HOST` after authorization. Pass its exact parent and human-source
+   reference to the completing chip or notification helper. It fails closed
+   when the owned chip has no scoped reporting permission. The worker must use
+   its `verification_request` to inspect the actual human message, paginating
+   when needed; the generated quote is a reference, not new authority.
 5. Verify a distinct registered Git worktree for every chip, including descendants.
    Record real title/thread/host/worktree/parent IDs with `app.cjs register` only after
    setup. App-managed worktrees may use detached HEAD; do not require `pw/` branches.
@@ -163,6 +169,8 @@ before ending its turn. A crash or turn that cannot start cannot self-report.
 - Record the exact native-tool receipt using `app.cjs ack`. On timeout or uncertain
   acceptance use `ambiguous`, never resend blindly. `accepted` is input acceptance,
   not proof that the parent replied to the user. See the reference for recovery.
+  The helper treats a native `isError: true` response as a failure even if the
+  caller mistakenly labels it accepted; review denials remain review-rejected.
 - An automatic approval rejection is a separate `review-rejected` hold, not a
   transient failure. Stop and explain the exact action and reviewer's reason.
   Do not retry the same report via another agent, sender, CLI command, hook or

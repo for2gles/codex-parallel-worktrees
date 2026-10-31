@@ -133,7 +133,14 @@ node "$A" authorize-report api --repo "$R" \
   --source-message ORIGINAL_USER_MESSAGE_ID --evidence-file /absolute/read-thread-evidence.json
 node "$A" report-context api --repo "$R" \
   --owner-thread CURRENT_PARENT_THREAD_ID --owner-host ACTUAL_HOST_ID
+node "$A" worker-context api --repo "$R" \
+  --owner-thread CURRENT_PARENT_THREAD_ID --owner-host ACTUAL_HOST_ID
 ```
+
+`worker-context`는 정확한 부모·인간 원문 userMessage·직접 조회용 `read_thread` 요청·알림 절차를 한 묶음으로 반환합니다.
+소유권·보고 근거가 없거나 보관된 칩이면 생성하지 않습니다. 반환한 프롬프트를 알림 담당에게 전달하고,
+담당이 실제 원문을 읽게 하세요. 인용 파일이나 에이전트의 전달문 자체는 승인이 아닙니다.
+일반적인 다른 채팅의 설계 요청을 새 부모의 보고 허가로 대체하지 않습니다.
 
 스크립트는 원문 대화·호스트·userMessage ID와 구조를 검사하고 정확한 부모에게만 범위를 고정합니다.
 내용이 실제로 허가하는 의미인지와 원문이 신뢰할 수 있는 앱 도구에서 왔는지는 호출자가 확인해야 합니다.
